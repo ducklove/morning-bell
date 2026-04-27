@@ -1,8 +1,16 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from polymarket_briefing.config import AppConfig
 from polymarket_briefing.models import NormalizedOutcome
-from polymarket_briefing.scoring import change_signal, deadline_signal, log_signal, relevance_signal
+from polymarket_briefing.scoring import (
+    change_signal,
+    deadline_signal,
+    log_signal,
+    probability_signal,
+    relevance_signal,
+)
 
 
 def outcome(**kwargs):
@@ -48,3 +56,8 @@ def test_log_signal_bounds():
     assert 0 <= log_signal(10, 100) <= 1
     assert log_signal(1000, 100) == 1
 
+
+def test_probability_signal_penalizes_extremes():
+    assert probability_signal(0.5) == 1.0
+    assert probability_signal(0.9) == pytest.approx(0.2)
+    assert probability_signal(0.99) == pytest.approx(0.02)

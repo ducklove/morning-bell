@@ -26,7 +26,7 @@ discovery:
       terms: [OpenAI, Anthropic, Google, Gemini, Claude, xAI, Grok, Chatbot Arena, AI model, LLM]
     korea_politics:
       weight: 1.0
-      terms: [Seoul, Korea, mayor, election, presidential, Democratic Party, People Power Party]
+      terms: [Seoul, Korea, Korean, Seoul mayor, mayoral election, Korean presidential election, Democratic Party, People Power Party]
     geopolitics_logistics:
       weight: 0.9
       terms: [Hormuz, Iran, Israel, shipping, oil, tanker, blockade, ceasefire]
@@ -39,11 +39,12 @@ scoring:
   max_items: 7
   probability_change_alert_pp: 3.0
   score_weights:
-    change_signal: 0.45
+    change_signal: 0.40
     relevance_signal: 0.25
     volume_signal: 0.15
-    deadline_signal: 0.10
-    liquidity_signal: 0.05
+    probability_signal: 0.10
+    deadline_signal: 0.07
+    liquidity_signal: 0.03
 
 notification:
   provider: ntfy
@@ -60,4 +61,3 @@ notification:
 storage:
   path: "state/briefing_state.sqlite"
   snapshot_dir: "state/snapshots"
-

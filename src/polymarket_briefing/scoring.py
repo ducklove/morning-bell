@@ -7,11 +7,12 @@ from polymarket_briefing.config import AppConfig
 from polymarket_briefing.models import NormalizedOutcome, ScoredOutcome
 
 DEFAULT_WEIGHTS = {
-    "change_signal": 0.45,
+    "change_signal": 0.40,
     "relevance_signal": 0.25,
     "volume_signal": 0.15,
-    "deadline_signal": 0.10,
-    "liquidity_signal": 0.05,
+    "probability_signal": 0.10,
+    "deadline_signal": 0.07,
+    "liquidity_signal": 0.03,
 }
 
 
@@ -43,6 +44,7 @@ def score_outcome(
         "change_signal": change_signal(delta_24h_pp),
         "relevance_signal": relevance_signal(outcome, config),
         "volume_signal": log_signal(outcome.volume_24h or outcome.volume, max_volume_seen),
+        "probability_signal": probability_signal(outcome.probability),
         "deadline_signal": deadline_signal(outcome, observed_at),
         "liquidity_signal": log_signal(outcome.liquidity, max_liquidity_seen),
     }
@@ -89,6 +91,13 @@ def log_signal(value: float | None, max_seen: float) -> float:
     return min(math.log1p(value) / math.log1p(max_seen), 1.0)
 
 
+def probability_signal(probability: float | None) -> float:
+    if probability is None:
+        return 0.3
+    bounded = max(0.0, min(probability, 1.0))
+    return max(0.0, 1.0 - abs(bounded - 0.5) * 2)
+
+
 def deadline_signal(outcome: NormalizedOutcome, observed_at: datetime) -> float:
     if outcome.end_date is None:
         return 0
@@ -124,4 +133,3 @@ def reasons_for(
 
 def _key(outcome: NormalizedOutcome) -> tuple[str, str | None, str]:
     return (outcome.event_slug, outcome.market_id, outcome.outcome)
-

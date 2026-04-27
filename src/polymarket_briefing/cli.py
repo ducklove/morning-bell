@@ -7,6 +7,7 @@ from typing import Annotated
 
 import typer
 
+from polymarket_briefing.ai_summary import load_openrouter_key, summarize_with_openrouter
 from polymarket_briefing.config import load_config
 from polymarket_briefing.models import NormalizedOutcome
 from polymarket_briefing.normalize import normalize_event, normalize_events
@@ -28,6 +29,8 @@ app = typer.Typer(no_args_is_help=True)
 def run(
     config: Annotated[Path, typer.Option("--config", "-c")] = Path("config.yaml"),
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    ai_summary: Annotated[bool, typer.Option("--ai-summary")] = False,
+    ai_model: Annotated[str, typer.Option("--ai-model")] = "qwen/qwen3.6-flash",
 ) -> None:
     cfg = load_config(config)
     observed_at = utc_now()
@@ -35,9 +38,14 @@ def run(
         outcomes = _fetch_all(client, cfg)
         deltas = _calculate_deltas(client, storage, outcomes, observed_at, set(cfg.watchlist_slugs))
         scored = score_outcomes(outcomes, deltas, cfg, observed_at)
-        filtered = [item for item in scored if item.score >= cfg.scoring.min_score_to_notify]
-        selected = filtered[: cfg.scoring.max_items]
+        selected = _select_items(scored, set(cfg.watchlist_slugs), cfg.scoring.min_score_to_notify)
+        selected = selected[: cfg.scoring.max_items]
         message = summarize(selected, cfg.scoring.max_items, cfg.timezone)
+        if ai_summary:
+            api_key = load_openrouter_key()
+            if not api_key:
+                raise RuntimeError("OPENROUTER_API_KEY or keys openrouter entry is required")
+            message = summarize_with_openrouter(selected, message, api_key, model=ai_model)
         effective_dry_run = dry_run or cfg.notification.dry_run_default
         if selected:
             top = selected[0]
@@ -174,6 +182,33 @@ def _dedupe_outcomes(outcomes: list[NormalizedOutcome]) -> list[NormalizedOutcom
             seen.add(key)
             deduped.append(item)
     return deduped
+
+
+def _select_items(
+    scored,
+    watchlist_slugs: set[str],
+    min_score: float,
+):
+    watchlist = [item for item in scored if item.outcome.event_slug in watchlist_slugs]
+    interesting = [
+        item
+        for item in scored
+        if item.score >= min_score and item.outcome.event_slug not in watchlist_slugs
+    ]
+    return _dedupe_scored_groups(watchlist + interesting)
+
+
+def _dedupe_scored_groups(scored):
+    seen = set()
+    selected = []
+    for item in scored:
+        group_key = (item.outcome.event_slug, item.outcome.market_id)
+        if group_key in seen:
+            selected.append(item)
+            continue
+        seen.add(group_key)
+        selected.append(item)
+    return selected
 
 
 def _key(outcome: NormalizedOutcome) -> tuple[str, str | None, str]:
