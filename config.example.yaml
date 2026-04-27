@@ -1,0 +1,62 @@
+timezone: Asia/Seoul
+run_time_local: "08:07"
+
+polymarket:
+  gamma_base_url: "https://gamma-api.polymarket.com"
+  clob_base_url: "https://clob.polymarket.com"
+  request_timeout_seconds: 20
+  max_retries: 3
+  backoff_seconds: 1.5
+
+watchlist_slugs:
+  - which-company-has-the-best-ai-model-end-of-may
+  - strait-of-hormuz-traffic-returns-to-normal-by-end-of-may
+  - 2026-seoul-mayoral-election-winner
+  - largest-company-end-of-december-2026
+
+discovery:
+  enabled: true
+  max_events: 150
+  include_active_only: true
+  include_closed: false
+  min_volume_24h: 5000
+  keywords:
+    ai_frontier:
+      weight: 1.0
+      terms: [OpenAI, Anthropic, Google, Gemini, Claude, xAI, Grok, Chatbot Arena, AI model, LLM]
+    korea_politics:
+      weight: 1.0
+      terms: [Seoul, Korea, mayor, election, presidential, Democratic Party, People Power Party]
+    geopolitics_logistics:
+      weight: 0.9
+      terms: [Hormuz, Iran, Israel, shipping, oil, tanker, blockade, ceasefire]
+    bigtech_marketcap:
+      weight: 0.9
+      terms: [NVIDIA, Apple, Microsoft, Alphabet, Meta, Amazon, Tesla, SpaceX, market cap, largest company, GPU]
+
+scoring:
+  min_score_to_notify: 35
+  max_items: 7
+  probability_change_alert_pp: 3.0
+  score_weights:
+    change_signal: 0.45
+    relevance_signal: 0.25
+    volume_signal: 0.15
+    deadline_signal: 0.10
+    liquidity_signal: 0.05
+
+notification:
+  provider: ntfy
+  dry_run_default: false
+  ntfy:
+    topic_env: NTFY_TOPIC
+    title: "Polymarket 아침 브리핑"
+    priority: 3
+  telegram:
+    enabled: false
+    bot_token_env: TELEGRAM_BOT_TOKEN
+    chat_id_env: TELEGRAM_CHAT_ID
+
+storage:
+  path: "state/briefing_state.sqlite"
+  snapshot_dir: "state/snapshots"
