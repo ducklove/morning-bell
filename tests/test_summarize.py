@@ -31,6 +31,7 @@ def test_summary_contains_korean_header_url_and_disclaimer():
     assert "https://polymarket.com/event/slug" in text
     assert "정보 요약이며 투자 조언이 아닙니다" in text
     assert "(+6.5pp)" in text
+    assert "해설:" in text
 
 
 def test_summary_respects_max_items():
@@ -40,3 +41,32 @@ def test_summary_respects_max_items():
     ]
     text = summarize(items, max_items=1)
     assert text.count("링크:") == 1
+
+
+def test_summary_uses_specific_market_question_and_korean_translation():
+    yes = sample_outcome()
+    no = NormalizedOutcome(**{**yes.__dict__, "outcome": "No", "probability": 0.67})
+    yes = NormalizedOutcome(
+        **{
+            **yes.__dict__,
+            "event_title": "Which company has the best AI model end of May?",
+            "market_question": "Will Google have the best AI model at the end of May 2026?",
+            "probability": 0.33,
+        }
+    )
+    no = NormalizedOutcome(
+        **{
+            **no.__dict__,
+            "event_title": "Which company has the best AI model end of May?",
+            "market_question": "Will Google have the best AI model at the end of May 2026?",
+        }
+    )
+    text = summarize(
+        [
+            ScoredOutcome(yes, 80, 2.0, ("watchlist",)),
+            ScoredOutcome(no, 80, -2.0, ("watchlist",)),
+        ],
+        max_items=7,
+    )
+    assert "2026년 5월 말 최고 AI 모델 보유 후보: Google" in text
+    assert "Yes 확률이 24시간 전보다 2.0pp 올랐습니다" in text
