@@ -13,9 +13,9 @@ from polymarket_briefing.utils import pct, pp
 def summarize(items: list[ScoredOutcome], max_items: int, timezone_name: str = "Asia/Seoul") -> str:
     local_now = datetime.now(ZoneInfo(timezone_name))
     lines = [f"[Polymarket 아침 브리핑 | {local_now:%Y-%m-%d}]", ""]
-    grouped: dict[tuple[str, str | None], list[ScoredOutcome]] = defaultdict(list)
+    grouped: dict[str, list[ScoredOutcome]] = defaultdict(list)
     for item in items:
-        key = (item.outcome.event_slug, item.outcome.market_id)
+        key = item.outcome.event_slug
         if len(grouped) < max_items or key in grouped:
             grouped[key].append(item)
         if len(grouped) >= max_items and key not in grouped:
@@ -24,11 +24,12 @@ def summarize(items: list[ScoredOutcome], max_items: int, timezone_name: str = "
     for index, group in enumerate(grouped.values(), start=1):
         top = group[0]
         outcome = top.outcome
-        lines.append(f"{index}) {_display_title(outcome.event_title, outcome.market_question)}")
-        ordered_group = _display_order(group)
-        facts = ", ".join(
-            f"{item.outcome.outcome} {pct(item.outcome.probability)}{pp(item.delta_24h_pp)}"
-            for item in ordered_group[:4]
+        has_multiple_markets = _has_multiple_markets(group)
+        title_source = outcome.event_title if has_multiple_markets else outcome.market_question
+        lines.append(f"{index}) {_display_title(outcome.event_title, title_source)}")
+        ordered_group = _display_items(group)
+        facts = "; ".join(
+            _fact_line(item, has_multiple_markets) for item in ordered_group[:5]
         )
         lines.append(facts or f"거래량 {outcome.volume_24h or outcome.volume or 0:.0f}")
         explanation = _trend_explanation(ordered_group)
@@ -45,6 +46,13 @@ def summarize(items: list[ScoredOutcome], max_items: int, timezone_name: str = "
     return "\n".join(lines)
 
 
+def _display_items(group: list[ScoredOutcome]) -> list[ScoredOutcome]:
+    if _has_multiple_markets(group):
+        yes_items = [item for item in group if item.outcome.outcome.lower() == "yes"]
+        return sorted(yes_items or group, key=lambda item: item.score, reverse=True)
+    return _display_order(group)
+
+
 def _display_order(group: list[ScoredOutcome]) -> list[ScoredOutcome]:
     outcome_names = {item.outcome.outcome.lower() for item in group}
     if {"yes", "no"}.issubset(outcome_names):
@@ -55,9 +63,34 @@ def _display_order(group: list[ScoredOutcome]) -> list[ScoredOutcome]:
     return sorted(group, key=lambda item: item.outcome.probability or 0, reverse=True)
 
 
+def _has_multiple_markets(group: list[ScoredOutcome]) -> bool:
+    return len({item.outcome.market_id for item in group}) > 1
+
+
+def _fact_line(item: ScoredOutcome, include_market_label: bool) -> str:
+    prefix = f"{_market_label(item.outcome.market_question)} " if include_market_label else ""
+    return f"{prefix}{item.outcome.outcome} {pct(item.outcome.probability)}{pp(item.delta_24h_pp)}"
+
+
+def _market_label(question: str) -> str:
+    patterns = [
+        r"Will (.+) have the best AI model at the end of May 2026\?",
+        r"Will (.+) be the largest company in the world by market cap on December 31\?",
+    ]
+    for pattern in patterns:
+        match = re.fullmatch(pattern, question)
+        if match:
+            return match.group(1)
+    return question
+
+
 def _display_title(event_title: str, market_question: str) -> str:
     source = market_question if market_question and market_question != event_title else event_title
     translations: list[tuple[str, str | None]] = [
+        (
+            r"Which company has the best AI model end of May\?",
+            "2026년 5월 말 최고 AI 모델 경쟁",
+        ),
         (
             r"Will (.+) have the best AI model at the end of May 2026\?",
             "2026년 5월 말 최고 AI 모델 보유 후보: {name}",

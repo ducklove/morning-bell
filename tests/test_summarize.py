@@ -70,3 +70,34 @@ def test_summary_uses_specific_market_question_and_korean_translation():
     )
     assert "2026년 5월 말 최고 AI 모델 보유 후보: Google" in text
     assert "Yes 확률이 24시간 전보다 2.0pp 올랐습니다" in text
+
+
+def test_summary_groups_multi_market_event_with_market_labels():
+    google = sample_outcome()
+    anthropic = NormalizedOutcome(
+        **{
+            **google.__dict__,
+            "market_id": "m2",
+            "market_question": "Will Anthropic have the best AI model at the end of May 2026?",
+            "probability": 0.51,
+        }
+    )
+    google = NormalizedOutcome(
+        **{
+            **google.__dict__,
+            "event_title": "Which company has the best AI model end of May?",
+            "market_question": "Will Google have the best AI model at the end of May 2026?",
+            "probability": 0.33,
+        }
+    )
+    text = summarize(
+        [
+            ScoredOutcome(google, 80, 2.0, ("watchlist",)),
+            ScoredOutcome(anthropic, 75, 1.0, ("watchlist",)),
+        ],
+        max_items=7,
+    )
+    assert text.count("링크:") == 1
+    assert "2026년 5월 말 최고 AI 모델 경쟁" in text
+    assert "Google Yes 33.0%" in text
+    assert "Anthropic Yes 51.0%" in text

@@ -8,6 +8,7 @@ from typing import Annotated
 import typer
 
 from polymarket_briefing.ai_summary import load_openrouter_key, summarize_with_openrouter
+from polymarket_briefing.charts import build_price_charts
 from polymarket_briefing.config import load_config
 from polymarket_briefing.models import NormalizedOutcome
 from polymarket_briefing.normalize import normalize_event, normalize_events
@@ -47,6 +48,9 @@ def run(
                 raise RuntimeError("OPENROUTER_API_KEY or keys openrouter entry is required")
             message = summarize_with_openrouter(selected, message, api_key, model=ai_model)
         effective_dry_run = dry_run or cfg.notification.dry_run_default
+        attachments = []
+        if cfg.notification.provider.lower() == "telegram":
+            attachments = build_price_charts(client, selected, observed_at)
         if selected:
             top = selected[0]
             key = dedupe_key_for(
@@ -58,11 +62,16 @@ def run(
                 top.delta_24h_pp,
             )
             if effective_dry_run or not storage.notification_sent(key):
-                notify(cfg.notification, message, dry_run=effective_dry_run)
+                notify(
+                    cfg.notification,
+                    message,
+                    dry_run=effective_dry_run,
+                    attachments=attachments,
+                )
                 if not effective_dry_run:
                     storage.record_notification(key, "Polymarket 아침 브리핑", observed_at)
         else:
-            notify(cfg.notification, message, dry_run=effective_dry_run)
+            notify(cfg.notification, message, dry_run=effective_dry_run, attachments=attachments)
         storage.insert_snapshots(outcomes, observed_at)
 
 
@@ -189,25 +198,37 @@ def _select_items(
     watchlist_slugs: set[str],
     min_score: float,
 ):
-    watchlist = [item for item in scored if item.outcome.event_slug in watchlist_slugs]
-    interesting = [
-        item
-        for item in scored
-        if item.score >= min_score and item.outcome.event_slug not in watchlist_slugs
-    ]
-    return _dedupe_scored_groups(watchlist + interesting)
-
-
-def _dedupe_scored_groups(scored):
-    seen = set()
-    selected = []
+    grouped: dict[str, list] = {}
     for item in scored:
-        group_key = (item.outcome.event_slug, item.outcome.market_id)
-        if group_key in seen:
-            selected.append(item)
+        if item.score < min_score and item.outcome.event_slug not in watchlist_slugs:
             continue
-        seen.add(group_key)
-        selected.append(item)
+        grouped.setdefault(item.outcome.event_slug, []).append(item)
+
+    event_order = sorted(
+        grouped,
+        key=lambda slug: (
+            0 if slug in watchlist_slugs else 1,
+            -max(item.score for item in grouped[slug]),
+        ),
+    )
+    selected = []
+    for slug in event_order:
+        selected.extend(_top_event_items(grouped[slug]))
+    return selected
+
+
+def _top_event_items(items: list, max_markets: int = 3) -> list:
+    markets: dict[str | None, list] = {}
+    for item in items:
+        markets.setdefault(item.outcome.market_id, []).append(item)
+    ordered_markets = sorted(
+        markets.values(),
+        key=lambda group: max(item.score for item in group),
+        reverse=True,
+    )
+    selected = []
+    for group in ordered_markets[:max_markets]:
+        selected.extend(sorted(group, key=lambda item: item.outcome.outcome.lower() != "yes")[:2])
     return selected
 
 
