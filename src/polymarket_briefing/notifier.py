@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import httpx
 
@@ -28,7 +29,7 @@ def notify(settings: NotificationSettings, message: str, dry_run: bool = False) 
     provider = settings.provider.lower()
     if provider == "ntfy":
         ntfy = settings.ntfy
-        topic = os.environ.get(str(ntfy.get("topic_env", "NTFY_TOPIC")))
+        topic = _secret(str(ntfy.get("topic_env", "NTFY_TOPIC")))
         if not topic:
             raise RuntimeError("NTFY topic environment variable is not set")
         send_ntfy(
@@ -40,11 +41,30 @@ def notify(settings: NotificationSettings, message: str, dry_run: bool = False) 
         return
     if provider == "telegram":
         telegram = settings.telegram
-        bot_token = os.environ.get(str(telegram.get("bot_token_env", "TELEGRAM_BOT_TOKEN")))
-        chat_id = os.environ.get(str(telegram.get("chat_id_env", "TELEGRAM_CHAT_ID")))
+        bot_token = _secret(str(telegram.get("bot_token_env", "TELEGRAM_BOT_TOKEN")))
+        chat_id = _secret(str(telegram.get("chat_id_env", "TELEGRAM_CHAT_ID")))
         if not bot_token or not chat_id:
             raise RuntimeError("Telegram environment variables are not set")
         send_telegram(bot_token, chat_id, message)
         return
     raise RuntimeError(f"Unsupported notification provider: {settings.provider}")
 
+
+def _secret(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value:
+        return value
+    aliases = {name, name.lower()}
+    if name == "NTFY_TOPIC":
+        aliases.add("ntfy")
+    path = Path("keys")
+    if not path.exists():
+        return None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, raw_value = stripped.split("=", 1)
+        if key.strip() in aliases:
+            return raw_value.strip().strip('"').strip("'")
+    return None

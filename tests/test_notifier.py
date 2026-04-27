@@ -1,7 +1,7 @@
 import httpx
 
 from polymarket_briefing.config import NotificationSettings
-from polymarket_briefing.notifier import notify, send_ntfy, send_telegram
+from polymarket_briefing.notifier import _secret, notify, send_ntfy, send_telegram
 
 
 def test_ntfy_request(httpx_mock):
@@ -24,3 +24,9 @@ def test_dry_run_no_network(capsys):
     notify(NotificationSettings(), "hello", dry_run=True)
     assert "hello" in capsys.readouterr().out
 
+
+def test_secret_reads_keys_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    (tmp_path / "keys").write_text("TELEGRAM_BOT_TOKEN=token-from-file\n", encoding="utf-8")
+    assert _secret("TELEGRAM_BOT_TOKEN") == "token-from-file"
