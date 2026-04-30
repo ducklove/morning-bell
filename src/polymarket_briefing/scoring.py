@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from datetime import datetime, timedelta
 
 from polymarket_briefing.config import AppConfig
@@ -21,11 +22,24 @@ def score_outcomes(
     deltas: dict[tuple[str, str | None, str], float | None],
     config: AppConfig,
     observed_at: datetime,
+    sent_outcome_keys: set[tuple[str, str | None, str]] | None = None,
+    sent_event_slugs: set[str] | None = None,
 ) -> list[ScoredOutcome]:
     max_volume = max((item.volume_24h or item.volume or 0 for item in outcomes), default=0)
     max_liquidity = max((item.liquidity or 0 for item in outcomes), default=0)
+    sent_outcome_keys = sent_outcome_keys or set()
+    sent_event_slugs = sent_event_slugs or set()
     scored = [
-        score_outcome(item, deltas.get(_key(item)), config, observed_at, max_volume, max_liquidity)
+        score_outcome(
+            item,
+            deltas.get(_key(item)),
+            config,
+            observed_at,
+            max_volume,
+            max_liquidity,
+            already_sent=_key(item) in sent_outcome_keys,
+            event_recently_sent=item.event_slug in sent_event_slugs,
+        )
         for item in outcomes
     ]
     return sorted(scored, key=lambda item: item.score, reverse=True)
@@ -38,6 +52,8 @@ def score_outcome(
     observed_at: datetime,
     max_volume_seen: float,
     max_liquidity_seen: float,
+    already_sent: bool = False,
+    event_recently_sent: bool = False,
 ) -> ScoredOutcome:
     weights = DEFAULT_WEIGHTS | config.scoring.score_weights
     signals = {
@@ -49,11 +65,17 @@ def score_outcome(
         "liquidity_signal": log_signal(outcome.liquidity, max_liquidity_seen),
     }
     score = sum(weights[name] * 100 * signals[name] for name in weights)
+    if already_sent:
+        score *= max(0.0, min(config.scoring.sent_penalty_factor, 1.0))
+    elif event_recently_sent:
+        score *= max(0.0, min(config.scoring.sent_event_penalty_factor, 1.0))
     return ScoredOutcome(
         outcome=outcome,
         score=max(0, min(score, 100)),
         delta_24h_pp=delta_24h_pp,
-        reasons=tuple(reasons_for(outcome, signals, delta_24h_pp, config)),
+        reasons=tuple(
+            reasons_for(outcome, signals, delta_24h_pp, config, already_sent, event_recently_sent)
+        ),
     )
 
 
@@ -80,9 +102,17 @@ def relevance_signal(outcome: NormalizedOutcome, config: AppConfig) -> float:
     for profile in config.discovery.keywords.values():
         weight = float(profile.get("weight", 1.0))
         for term in profile.get("terms", []):
-            if str(term).lower() in haystack:
+            if _contains_term(haystack, str(term)):
                 score = max(score, min(weight, 1.0))
     return min(score, 1.0)
+
+
+def _contains_term(haystack: str, term: str) -> bool:
+    normalized = term.strip().lower()
+    if not normalized:
+        return False
+    pattern = rf"(?<![a-z0-9]){re.escape(normalized)}(?![a-z0-9])"
+    return re.search(pattern, haystack) is not None
 
 
 def log_signal(value: float | None, max_seen: float) -> float:
@@ -116,8 +146,14 @@ def reasons_for(
     signals: dict[str, float],
     delta_24h_pp: float | None,
     config: AppConfig,
+    already_sent: bool = False,
+    event_recently_sent: bool = False,
 ) -> list[str]:
     reasons: list[str] = []
+    if already_sent:
+        reasons.append("최근 발송")
+    elif event_recently_sent:
+        reasons.append("최근 이벤트")
     if outcome.event_slug in config.watchlist_slugs:
         reasons.append("watchlist")
     if delta_24h_pp is not None and abs(delta_24h_pp) >= config.scoring.probability_change_alert_pp:

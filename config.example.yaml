@@ -11,33 +11,44 @@ polymarket:
 watchlist_slugs:
   - which-company-has-the-best-ai-model-end-of-may
   - strait-of-hormuz-traffic-returns-to-normal-by-end-of-may
-  - 2026-seoul-mayoral-election-winner
-  - largest-company-end-of-december-2026
 
 discovery:
   enabled: true
-  max_events: 150
+  max_events: 300
   include_active_only: true
   include_closed: false
-  min_volume_24h: 5000
+  min_volume_24h: 1000
+  exclude_terms:
+    - what will trump say
+    - will trump say
+    - say during
   keywords:
     ai_frontier:
       weight: 1.0
-      terms: [OpenAI, Anthropic, Google, Gemini, Claude, xAI, Grok, Chatbot Arena, AI model, LLM]
+      terms: [OpenAI, Anthropic, Google, Gemini, Claude, xAI, Grok, GPT, GPT-5, GPT-5.6, Chatbot Arena, AI model, LLM, AGI]
     korea_politics:
       weight: 1.0
       terms: [Seoul, Korea, Korean, Seoul mayor, mayoral election, Korean presidential election, Democratic Party, People Power Party]
+    us_politics:
+      weight: 1.0
+      terms: [Senate, House, Congress, midterms, balance of power, Democrat, Republican, governor, election]
+    frontier_tech_markets:
+      weight: 0.95
+      terms: [SpaceX, xAI, Tesla, IPO, valuation, closing market cap, IPO day, Starlink, Neuralink, private company]
     geopolitics_logistics:
       weight: 0.9
-      terms: [Hormuz, Iran, Israel, shipping, oil, tanker, blockade, ceasefire]
+      terms: [Hormuz, Iran, Israel, shipping, oil tanker, blockade, ceasefire]
     bigtech_marketcap:
       weight: 0.9
-      terms: [NVIDIA, Apple, Microsoft, Alphabet, Meta, Amazon, Tesla, SpaceX, market cap, largest company, GPU]
+      terms: [NVIDIA, Apple, Microsoft, Alphabet, Meta, Amazon, Tesla, SpaceX, largest company, GPU]
 
 scoring:
   min_score_to_notify: 35
   max_items: 7
   probability_change_alert_pp: 3.0
+  sent_penalty_days: 7
+  sent_penalty_factor: 0.25
+  sent_event_penalty_factor: 0.60
   score_weights:
     change_signal: 0.40
     relevance_signal: 0.25

@@ -46,6 +46,15 @@ class BriefingStorage:
               dedupe_key TEXT NOT NULL UNIQUE,
               title TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS sent_outcomes (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              sent_at TEXT NOT NULL,
+              event_slug TEXT NOT NULL,
+              market_id TEXT,
+              outcome TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_sent_outcomes_recent
+              ON sent_outcomes (sent_at, event_slug, market_id, outcome);
             """
         )
         self.connection.commit()
@@ -121,6 +130,35 @@ class BriefingStorage:
             return True
         except sqlite3.IntegrityError:
             return False
+
+    def recently_sent_outcome_keys(
+        self, observed_at: datetime, days_back: int
+    ) -> set[tuple[str, str | None, str]]:
+        cutoff = observed_at - timedelta(days=max(days_back, 0))
+        rows = self.connection.execute(
+            """
+            SELECT DISTINCT event_slug, market_id, outcome
+            FROM sent_outcomes
+            WHERE sent_at >= ?
+            """,
+            (cutoff.isoformat(),),
+        ).fetchall()
+        return {(row["event_slug"], row["market_id"], row["outcome"]) for row in rows}
+
+    def record_sent_outcomes(
+        self, outcomes: list[NormalizedOutcome], sent_at: datetime
+    ) -> None:
+        self.connection.executemany(
+            """
+            INSERT INTO sent_outcomes (sent_at, event_slug, market_id, outcome)
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                (sent_at.isoformat(), item.event_slug, item.market_id, item.outcome)
+                for item in outcomes
+            ],
+        )
+        self.connection.commit()
 
 
 def calculate_snapshot_delta_pp(

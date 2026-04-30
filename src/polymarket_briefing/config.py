@@ -23,6 +23,7 @@ class DiscoverySettings:
     include_active_only: bool = True
     include_closed: bool = False
     min_volume_24h: float = 5000
+    exclude_terms: list[str] = field(default_factory=list)
     keywords: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
@@ -31,6 +32,9 @@ class ScoringSettings:
     min_score_to_notify: float = 35
     max_items: int = 7
     probability_change_alert_pp: float = 3.0
+    sent_penalty_days: int = 7
+    sent_penalty_factor: float = 0.25
+    sent_event_penalty_factor: float = 0.60
     score_weights: dict[str, float] = field(default_factory=dict)
 
 
@@ -73,4 +77,3 @@ def load_config(path: str | Path) -> AppConfig:
         notification=NotificationSettings(**raw.get("notification", {})),
         storage=StorageSettings(**raw.get("storage", {})),
     )
-

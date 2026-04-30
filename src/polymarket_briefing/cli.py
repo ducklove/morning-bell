@@ -14,7 +14,7 @@ from polymarket_briefing.models import NormalizedOutcome
 from polymarket_briefing.normalize import normalize_event, normalize_events
 from polymarket_briefing.notifier import notify
 from polymarket_briefing.polymarket_client import PolymarketClient
-from polymarket_briefing.scoring import score_outcomes
+from polymarket_briefing.scoring import _contains_term, score_outcomes
 from polymarket_briefing.storage import (
     BriefingStorage,
     calculate_snapshot_delta_pp,
@@ -38,7 +38,13 @@ def run(
     with PolymarketClient(cfg.polymarket) as client, BriefingStorage(cfg.storage.path) as storage:
         outcomes = _fetch_all(client, cfg)
         deltas = _calculate_deltas(client, storage, outcomes, observed_at, set(cfg.watchlist_slugs))
-        scored = score_outcomes(outcomes, deltas, cfg, observed_at)
+        sent_outcome_keys = storage.recently_sent_outcome_keys(
+            observed_at, cfg.scoring.sent_penalty_days
+        )
+        sent_event_slugs = {event_slug for event_slug, _market_id, _outcome in sent_outcome_keys}
+        scored = score_outcomes(
+            outcomes, deltas, cfg, observed_at, sent_outcome_keys, sent_event_slugs
+        )
         selected = _select_items(scored, set(cfg.watchlist_slugs), cfg.scoring.min_score_to_notify)
         selected = selected[: cfg.scoring.max_items]
         message = summarize(selected, cfg.scoring.max_items, cfg.timezone)
@@ -70,6 +76,7 @@ def run(
                 )
                 if not effective_dry_run:
                     storage.record_notification(key, "Polymarket 아침 브리핑", observed_at)
+                    storage.record_sent_outcomes([item.outcome for item in selected], observed_at)
         else:
             notify(cfg.notification, message, dry_run=effective_dry_run, attachments=attachments)
         storage.insert_snapshots(outcomes, observed_at)
@@ -106,6 +113,7 @@ def discover(config: Annotated[Path, typer.Option("--config", "-c")] = Path("con
         outcomes = _filter_discovery(
             normalize_events(events),
             cfg.discovery.min_volume_24h,
+            cfg.discovery.exclude_terms,
         )
         scored = score_outcomes(outcomes, {}, cfg, observed_at)[: cfg.scoring.max_items]
         for item in scored:
@@ -135,6 +143,7 @@ def _fetch_all(client: PolymarketClient, cfg) -> list[NormalizedOutcome]:
                 _filter_discovery(
                     normalize_events(events),
                     cfg.discovery.min_volume_24h,
+                    cfg.discovery.exclude_terms,
                 )
             )
         except RuntimeError as exc:
@@ -174,12 +183,32 @@ def _calculate_deltas(
 def _filter_discovery(
     outcomes: list[NormalizedOutcome],
     min_volume_24h: float,
+    exclude_terms: list[str] | None = None,
 ) -> list[NormalizedOutcome]:
+    exclude_terms = exclude_terms or []
     return [
         item
         for item in outcomes
-        if (item.volume_24h or item.volume or 0) >= min_volume_24h and item.closed is not True
+        if (item.volume_24h or item.volume or 0) >= min_volume_24h
+        and item.closed is not True
+        and not _matches_excluded_interest(item, exclude_terms)
     ]
+
+
+def _matches_excluded_interest(outcome: NormalizedOutcome, exclude_terms: list[str]) -> bool:
+    haystack = " ".join(
+        filter(
+            None,
+            [
+                outcome.event_title,
+                outcome.market_question,
+                outcome.description,
+                outcome.category,
+                outcome.subcategory,
+            ],
+        )
+    ).lower()
+    return any(_contains_term(haystack, term) for term in exclude_terms)
 
 
 def _dedupe_outcomes(outcomes: list[NormalizedOutcome]) -> list[NormalizedOutcome]:
@@ -200,7 +229,12 @@ def _select_items(
 ):
     grouped: dict[str, list] = {}
     for item in scored:
-        if item.score < min_score and item.outcome.event_slug not in watchlist_slugs:
+        recently_sent = "최근 발송" in item.reasons or "최근 이벤트" in item.reasons
+        sharply_changed = "24h 급변" in item.reasons
+        if item.score < min_score and (
+            item.outcome.event_slug not in watchlist_slugs
+            or (recently_sent and not sharply_changed)
+        ):
             continue
         grouped.setdefault(item.outcome.event_slug, []).append(item)
 

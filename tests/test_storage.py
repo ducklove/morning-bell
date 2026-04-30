@@ -6,8 +6,8 @@ from polymarket_briefing.models import NormalizedOutcome
 from polymarket_briefing.storage import BriefingStorage, calculate_snapshot_delta_pp
 
 
-def sample_outcome(probability=0.55):
-    return NormalizedOutcome(
+def sample_outcome(probability=0.55, **kwargs):
+    defaults = dict(
         event_id=None,
         event_slug="slug",
         event_title="Title",
@@ -25,6 +25,10 @@ def sample_outcome(probability=0.55):
         closed=False,
         resolution_source=None,
         url="https://polymarket.com/event/slug",
+    )
+    defaults.update(kwargs)
+    return NormalizedOutcome(
+        **defaults,
     )
 
 
@@ -44,3 +48,14 @@ def test_notification_dedupe(tmp_path):
         assert storage.record_notification("key", "title", now) is True
         assert storage.record_notification("key", "title", now) is False
         assert storage.notification_sent("key") is True
+
+
+def test_recently_sent_outcome_keys_respect_window(tmp_path):
+    now = datetime.now(UTC)
+    with BriefingStorage(str(tmp_path / "state.sqlite")) as storage:
+        storage.record_sent_outcomes([sample_outcome()], now - timedelta(days=2))
+        storage.record_sent_outcomes(
+            [sample_outcome(market_id="old")], now - timedelta(days=10)
+        )
+
+        assert storage.recently_sent_outcome_keys(now, days_back=7) == {("slug", "m1", "Yes")}
