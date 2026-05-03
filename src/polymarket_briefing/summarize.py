@@ -35,7 +35,7 @@ def summarize(items: list[ScoredOutcome], max_items: int, timezone_name: str = "
         explanation = _trend_explanation(ordered_group)
         if explanation:
             lines.append(f"해설: {explanation}")
-        lines.append(f"왜 봄: {' + '.join(top.reasons)}")
+        lines.append(f"왜 봄: {' + '.join(_reason_label(reason) for reason in top.reasons)}")
         lines.append(f"링크: {outcome.url}")
         lines.append("")
 
@@ -69,7 +69,9 @@ def _has_multiple_markets(group: list[ScoredOutcome]) -> bool:
 
 def _fact_line(item: ScoredOutcome, include_market_label: bool) -> str:
     prefix = f"{_market_label(item.outcome.market_question)} " if include_market_label else ""
-    return f"{prefix}{item.outcome.outcome} {pct(item.outcome.probability)}{pp(item.delta_24h_pp)}"
+    probability = pct(item.outcome.probability)
+    delta = pp(item.delta_24h_pp)
+    return f"{prefix}{_outcome_label(item.outcome.outcome)} {probability}{delta}"
 
 
 def _market_label(question: str) -> str:
@@ -81,7 +83,7 @@ def _market_label(question: str) -> str:
         match = re.fullmatch(pattern, question)
         if match:
             return match.group(1)
-    return question
+    return _display_title(question, question)
 
 
 def _display_title(event_title: str, market_question: str) -> str:
@@ -107,20 +109,143 @@ def _display_title(event_title: str, market_question: str) -> str:
             r"Largest Company end of December 2026\?",
             "2026년 말 시가총액 1위 기업은?",
         ),
+        (
+            r"How many ships transit the Strait of Hormuz week of (.+)",
+            "{name} 주 호르무즈 해협 통항 선박 수",
+        ),
+        (
+            r"Will ([0-9+-]+) ships transit the Strait of Hormuz between (.+)\?",
+            "{name}척 통항: {body}",
+        ),
+        (
+            r"(.+) vs\. (.+)",
+            "{name} 대 {body}",
+        ),
     ]
     for pattern, template in translations:
         match = re.fullmatch(pattern, source)
         if match:
             return _format_translation(match, template)
-    return source
+    return _rule_based_korean_title(source)
 
 
 def _format_translation(match: Match[str], template: str | None) -> str:
     if template is None:
         return match.group(0)
     if "{name}" in template:
-        return template.format(name=match.group(1))
+        values = {
+            "name": _translate_market_phrase(match.group(1).rstrip("?")),
+            "body": (
+                _translate_market_phrase(match.group(2).rstrip("?"))
+                if len(match.groups()) >= 2
+                else ""
+            ),
+        }
+        return template.format(**values)
     return template
+
+
+def _rule_based_korean_title(source: str) -> str:
+    cleaned = source.strip()
+    normalized = cleaned.rstrip("?")
+    generic_patterns: list[tuple[str, str]] = [
+        (r"Will (.+) win (?:the )?(.+)", "{name}가 {body}에서 승리할까?"),
+        (r"Who will win (?:the )?(.+)", "{body}의 승자는?"),
+        (r"Which company will (.+)", "어느 기업이 {body}?"),
+        (r"Which company has (.+)", "{body}를 보유한 기업은?"),
+        (r"Will there be (.+)", "{body}이 발생할까?"),
+        (r"Will (.+) have (.+)", "{name}가 {body}를 보유할까?"),
+        (r"Will (.+) be (.+)", "{name}가 {body}일까?"),
+        (r"Will (.+) (.+)", "{name}가 {body}할까?"),
+    ]
+    for pattern, template in generic_patterns:
+        match = re.fullmatch(pattern, normalized, flags=re.IGNORECASE)
+        if not match:
+            continue
+        if "{name}" in template:
+            return template.format(
+                name=match.group(1),
+                body=_translate_market_phrase(match.group(2)),
+            )
+        return template.format(body=_translate_market_phrase(match.group(1)))
+    return _translate_market_phrase(normalized)
+
+
+def _translate_market_phrase(text: str) -> str:
+    phrase = text.strip()
+    replacements = [
+        (r"\bat the end of May 2026\b", "2026년 5월 말에"),
+        (r"\bApril\b", "4월"),
+        (r"\bApr\b", "4월"),
+        (r"\bMay\b", "5월"),
+        (r"\bJune\b", "6월"),
+        (r"\bJun\b", "6월"),
+        (r"\bJuly\b", "7월"),
+        (r"\bJul\b", "7월"),
+        (r"\bAugust\b", "8월"),
+        (r"\bAug\b", "8월"),
+        (r"\bSeptember\b", "9월"),
+        (r"\bSep\b", "9월"),
+        (r"\bOctober\b", "10월"),
+        (r"\bOct\b", "10월"),
+        (r"\bNovember\b", "11월"),
+        (r"\bNov\b", "11월"),
+        (r"\bDecember\b", "12월"),
+        (r"\bDec\b", "12월"),
+        (r"\bJanuary\b", "1월"),
+        (r"\bJan\b", "1월"),
+        (r"\bFebruary\b", "2월"),
+        (r"\bFeb\b", "2월"),
+        (r"\bMarch\b", "3월"),
+        (r"\bMar\b", "3월"),
+        (r"\bend of May\b", "5월 말"),
+        (r"\bend of December 2026\b", "2026년 말"),
+        (r"\bon December 31\b", "12월 31일에"),
+        (r"\bby market cap\b", "시가총액 기준"),
+        (r"\bmarket cap\b", "시가총액"),
+        (r"\blargest company in the world\b", "세계 최대 기업"),
+        (r"\bbest AI model\b", "최고 AI 모델"),
+        (r"\bAI model\b", "AI 모델"),
+        (r"\btraffic returns to normal\b", "통행이 정상화"),
+        (r"\breturns to normal\b", "정상화"),
+        (r"\bdiplomatic meeting\b", "외교 회담"),
+        (r"\bceasefire\b", "휴전"),
+        (r"\bblockade\b", "봉쇄"),
+        (r"\bmayoral election\b", "시장 선거"),
+        (r"\bpresidential election\b", "대통령 선거"),
+        (r"\belection\b", "선거"),
+        (r"\bSenate\b", "상원"),
+        (r"\bHouse\b", "하원"),
+        (r"\bCongress\b", "의회"),
+        (r"\bDemocrat(?:ic)?\b", "민주당"),
+        (r"\bRepublican\b", "공화당"),
+        (r"\bgovernor\b", "주지사"),
+        (r"\bIPO\b", "IPO"),
+        (r"\bvaluation\b", "기업가치"),
+        (r"\boil tanker\b", "유조선"),
+        (r"\bshipping\b", "해운"),
+    ]
+    translated = phrase
+    for pattern, replacement in replacements:
+        translated = re.sub(pattern, replacement, translated, flags=re.IGNORECASE)
+    translated = translated.replace("  ", " ").strip()
+    return translated
+
+
+def _outcome_label(outcome: str) -> str:
+    labels = {
+        "yes": "예",
+        "no": "아니오",
+    }
+    return labels.get(outcome.lower(), _translate_market_phrase(outcome))
+
+
+def _reason_label(reason: str) -> str:
+    labels = {
+        "watchlist": "관심 목록",
+        "24h 급변": "24시간 급변",
+    }
+    return labels.get(reason, reason)
 
 
 def _trend_explanation(group: list[ScoredOutcome]) -> str | None:
@@ -139,7 +264,7 @@ def _trend_explanation(group: list[ScoredOutcome]) -> str | None:
     else:
         direction = "거의 변하지 않았습니다"
     magnitude = f"{abs(delta):.1f}pp"
-    return f"Yes 확률이 24시간 전보다 {magnitude} {direction}. 현재는 {stance}입니다."
+    return f"예 확률이 24시간 전보다 {magnitude} {direction}. 현재는 {stance}입니다."
 
 
 def _stance(probability: float) -> str:

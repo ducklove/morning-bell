@@ -30,8 +30,11 @@ app = typer.Typer(no_args_is_help=True)
 def run(
     config: Annotated[Path, typer.Option("--config", "-c")] = Path("config.yaml"),
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
-    ai_summary: Annotated[bool, typer.Option("--ai-summary")] = False,
-    ai_model: Annotated[str, typer.Option("--ai-model")] = "qwen/qwen3.6-flash",
+    ai_summary: Annotated[
+        bool | None,
+        typer.Option("--ai-summary/--no-ai-summary"),
+    ] = None,
+    ai_model: Annotated[str | None, typer.Option("--ai-model")] = None,
 ) -> None:
     cfg = load_config(config)
     observed_at = utc_now()
@@ -48,11 +51,20 @@ def run(
         selected = _select_items(scored, set(cfg.watchlist_slugs), cfg.scoring.min_score_to_notify)
         selected = selected[: cfg.scoring.max_items]
         message = summarize(selected, cfg.scoring.max_items, cfg.timezone)
-        if ai_summary:
+        use_ai_summary = cfg.ai_summary.enabled if ai_summary is None else ai_summary
+        if use_ai_summary:
             api_key = load_openrouter_key()
             if not api_key:
                 raise RuntimeError("OPENROUTER_API_KEY or keys openrouter entry is required")
-            message = summarize_with_openrouter(selected, message, api_key, model=ai_model)
+            message = summarize_with_openrouter(
+                selected,
+                message,
+                api_key,
+                model=ai_model if ai_model else cfg.ai_summary.model,
+                max_retries=cfg.ai_summary.max_retries,
+                timeout_seconds=cfg.ai_summary.timeout_seconds,
+                backoff_seconds=cfg.ai_summary.backoff_seconds,
+            )
         effective_dry_run = dry_run or cfg.notification.dry_run_default
         attachments = []
         if cfg.notification.provider.lower() == "telegram":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from pathlib import Path
 
 import httpx
@@ -34,6 +35,9 @@ def summarize_with_openrouter(
     base_summary: str,
     api_key: str,
     model: str = "qwen/qwen3.6-flash",
+    max_retries: int = 3,
+    timeout_seconds: float = 45,
+    backoff_seconds: float = 1.5,
 ) -> str:
     facts = "\n".join(_item_fact(item) for item in items[:10])
     prompt = f"""
@@ -41,6 +45,7 @@ def summarize_with_openrouter(
 너는 한국어 아침 브리핑 문장을 다듬는 편집자입니다.
 
 규칙:
+- 영어 제목, 질문, outcome 표기는 자연스러운 한국어로 번역할 것. Yes는 예, No는 아니오로 쓸 것.
 - 투자 조언, 매수/매도 권유, 확정적 예측 금지.
 - 기존 요약의 항목 수, 항목 순서, 링크, outcome 묶음을 유지할 것.
 - Yes/No 또는 같은 market의 outcome을 별도 번호 항목으로 쪼개지 말 것.
@@ -56,36 +61,61 @@ def summarize_with_openrouter(
 후보 데이터:
 {facts}
 """.strip()
-    response = httpx.post(
-        OPENROUTER_URL,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/ducklove/morning-bell",
-            "X-Title": "morning-bell",
-        },
-        json={
-            "model": model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You write concise Korean market briefings from supplied facts only."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.2,
-            "max_tokens": 900,
-        },
-        timeout=45,
+    response = _post_openrouter(
+        api_key=api_key,
+        model=model,
+        prompt=prompt,
+        max_retries=max_retries,
+        timeout_seconds=timeout_seconds,
+        backoff_seconds=backoff_seconds,
     )
-    response.raise_for_status()
     data = response.json()
     ai_text = data["choices"][0]["message"]["content"].strip()
     if not _numbers_are_grounded(ai_text, base_summary):
         return base_summary
     return _ensure_required_lines(ai_text, base_summary)
+
+
+def _post_openrouter(
+    api_key: str,
+    model: str,
+    prompt: str,
+    max_retries: int,
+    timeout_seconds: float,
+    backoff_seconds: float,
+) -> httpx.Response:
+    attempts = max(1, max_retries)
+    for attempt in range(1, attempts + 1):
+        try:
+            response = httpx.post(
+                OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://github.com/ducklove/morning-bell",
+                    "X-Title": "morning-bell",
+                },
+                json={
+                    "model": model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "제공된 사실만 사용해 짧은 한국어 시장 브리핑을 씁니다.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.2,
+                    "max_tokens": 900,
+                },
+                timeout=timeout_seconds,
+            )
+            response.raise_for_status()
+            return response
+        except (httpx.TimeoutException, httpx.HTTPStatusError, httpx.TransportError):
+            if attempt == attempts:
+                raise
+            time.sleep(backoff_seconds * attempt)
+    raise RuntimeError("OpenRouter request failed")
 
 
 def _item_fact(item: ScoredOutcome) -> str:

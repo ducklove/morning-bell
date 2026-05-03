@@ -30,9 +30,10 @@ jobs:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           cp config.example.yaml config.yaml
-          polymarket-briefing run --config config.yaml
+          polymarket-briefing run --config config.yaml --ai-summary
 
       - name: Persist state snapshot
         run: |
@@ -41,4 +42,3 @@ jobs:
           git add state/ || true
           git commit -m "Update Polymarket briefing state" || echo "No state changes"
           git push || true
-

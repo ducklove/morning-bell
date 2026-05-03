@@ -39,6 +39,15 @@ class ScoringSettings:
 
 
 @dataclass(frozen=True)
+class AiSummarySettings:
+    enabled: bool = False
+    model: str = "qwen/qwen3.6-flash"
+    max_retries: int = 3
+    timeout_seconds: float = 45
+    backoff_seconds: float = 1.5
+
+
+@dataclass(frozen=True)
 class NotificationSettings:
     provider: str = "ntfy"
     dry_run_default: bool = False
@@ -60,6 +69,7 @@ class AppConfig:
     watchlist_slugs: list[str] = field(default_factory=list)
     discovery: DiscoverySettings = field(default_factory=DiscoverySettings)
     scoring: ScoringSettings = field(default_factory=ScoringSettings)
+    ai_summary: AiSummarySettings = field(default_factory=AiSummarySettings)
     notification: NotificationSettings = field(default_factory=NotificationSettings)
     storage: StorageSettings = field(default_factory=StorageSettings)
 
@@ -74,6 +84,7 @@ def load_config(path: str | Path) -> AppConfig:
         watchlist_slugs=list(raw.get("watchlist_slugs", [])),
         discovery=DiscoverySettings(**raw.get("discovery", {})),
         scoring=ScoringSettings(**raw.get("scoring", {})),
+        ai_summary=AiSummarySettings(**raw.get("ai_summary", {})),
         notification=NotificationSettings(**raw.get("notification", {})),
         storage=StorageSettings(**raw.get("storage", {})),
     )
