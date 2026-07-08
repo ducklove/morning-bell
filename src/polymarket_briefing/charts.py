@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from polymarket_briefing.models import ScoredOutcome
@@ -56,10 +56,10 @@ def _build_chart(
 
     start_ts = int((observed_at - timedelta(days=7)).timestamp())
     end_ts = int(observed_at.timestamp())
-    history = client.get_price_history(item.outcome.token_id or "", start_ts, end_ts, interval="1d")
+    history = client.get_price_history(item.outcome.token_id or "", start_ts, end_ts)
     points = _history_points(history)
     if item.outcome.probability is not None:
-        points.append((observed_at.replace(tzinfo=None), item.outcome.probability))
+        points.append((observed_at, item.outcome.probability))
     if len(points) < 2:
         return None
 
@@ -91,12 +91,12 @@ def _history_points(history: dict) -> list[tuple[datetime, float]]:
     for raw in raw_points:
         if not isinstance(raw, dict):
             continue
-        timestamp = raw.get("t") or raw.get("timestamp")
-        price = raw.get("p") or raw.get("price")
+        timestamp = raw.get("t") if raw.get("t") is not None else raw.get("timestamp")
+        price = raw.get("p") if raw.get("p") is not None else raw.get("price")
         if timestamp is None or price is None:
             continue
         try:
-            points.append((datetime.fromtimestamp(float(timestamp)), float(price)))
+            points.append((datetime.fromtimestamp(float(timestamp), tz=UTC), float(price)))
         except (TypeError, ValueError, OSError):
             continue
     return points

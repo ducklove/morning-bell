@@ -1,33 +1,18 @@
 from __future__ import annotations
 
-import os
 import re
 import time
-from pathlib import Path
 
 import httpx
 
 from polymarket_briefing.models import ScoredOutcome
-from polymarket_briefing.utils import pct, pp
+from polymarket_briefing.utils import pct, pp, read_secret
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
 def load_openrouter_key(keys_path: str = "keys") -> str | None:
-    env_key = os.environ.get("OPENROUTER_API_KEY")
-    if env_key:
-        return env_key
-    path = Path(keys_path)
-    if not path.exists():
-        return None
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        name, value = stripped.split("=", 1)
-        if name.strip().lower() in {"openrouter", "openrouter_api_key"}:
-            return value.strip().strip('"').strip("'")
-    return None
+    return read_secret("OPENROUTER_API_KEY", "openrouter", keys_path=keys_path)
 
 
 def summarize_with_openrouter(
@@ -105,7 +90,7 @@ def _post_openrouter(
                         {"role": "user", "content": prompt},
                     ],
                     "temperature": 0.2,
-                    "max_tokens": 900,
+                    "max_tokens": 1600,
                 },
                 timeout=timeout_seconds,
             )
@@ -140,10 +125,15 @@ def _ensure_required_lines(ai_text: str, base_summary: str) -> str:
     return "\n\n".join(_paragraphs(lines))
 
 
+def _numeric_tokens(text: str) -> set[tuple[float, str]]:
+    return {
+        (round(float(value), 1), unit)
+        for value, unit in re.findall(r"([+-]?\d+(?:\.\d+)?)(%|pp)", text)
+    }
+
+
 def _numbers_are_grounded(ai_text: str, base_summary: str) -> bool:
-    ai_numbers = set(re.findall(r"[+-]?\d+(?:\.\d+)?(?:%|pp)", ai_text))
-    base_numbers = set(re.findall(r"[+-]?\d+(?:\.\d+)?(?:%|pp)", base_summary))
-    return ai_numbers.issubset(base_numbers)
+    return _numeric_tokens(ai_text).issubset(_numeric_tokens(base_summary))
 
 
 def _paragraphs(lines: list[str]) -> list[str]:

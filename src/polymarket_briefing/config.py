@@ -27,6 +27,16 @@ class DiscoverySettings:
     keywords: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
+DEFAULT_SCORE_WEIGHTS = {
+    "change_signal": 0.40,
+    "relevance_signal": 0.25,
+    "volume_signal": 0.15,
+    "probability_signal": 0.10,
+    "deadline_signal": 0.07,
+    "liquidity_signal": 0.03,
+}
+
+
 @dataclass(frozen=True)
 class ScoringSettings:
     min_score_to_notify: float = 35
@@ -59,6 +69,7 @@ class NotificationSettings:
 class StorageSettings:
     path: str = "state/briefing_state.sqlite"
     snapshot_dir: str = "state/snapshots"
+    retention_days: int = 30
 
 
 @dataclass(frozen=True)
@@ -77,14 +88,25 @@ class AppConfig:
 def load_config(path: str | Path) -> AppConfig:
     with Path(path).open(encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
+    scoring_raw = dict(raw.get("scoring", {}))
+    _validate_score_weights(scoring_raw.get("score_weights", {}))
     return AppConfig(
         timezone=raw.get("timezone", "Asia/Seoul"),
         run_time_local=raw.get("run_time_local", "08:07"),
         polymarket=PolymarketSettings(**raw.get("polymarket", {})),
         watchlist_slugs=list(raw.get("watchlist_slugs", [])),
         discovery=DiscoverySettings(**raw.get("discovery", {})),
-        scoring=ScoringSettings(**raw.get("scoring", {})),
+        scoring=ScoringSettings(**scoring_raw),
         ai_summary=AiSummarySettings(**raw.get("ai_summary", {})),
         notification=NotificationSettings(**raw.get("notification", {})),
         storage=StorageSettings(**raw.get("storage", {})),
     )
+
+
+def _validate_score_weights(score_weights: dict[str, float]) -> None:
+    unknown = set(score_weights) - set(DEFAULT_SCORE_WEIGHTS)
+    if unknown:
+        raise ValueError(
+            f"Unknown scoring.score_weights keys: {sorted(unknown)}. "
+            f"Valid keys: {sorted(DEFAULT_SCORE_WEIGHTS)}"
+        )

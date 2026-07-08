@@ -4,17 +4,13 @@ import math
 import re
 from datetime import datetime, timedelta
 
-from polymarket_briefing.config import AppConfig
-from polymarket_briefing.models import NormalizedOutcome, ScoredOutcome
-
-DEFAULT_WEIGHTS = {
-    "change_signal": 0.40,
-    "relevance_signal": 0.25,
-    "volume_signal": 0.15,
-    "probability_signal": 0.10,
-    "deadline_signal": 0.07,
-    "liquidity_signal": 0.03,
-}
+from polymarket_briefing.config import DEFAULT_SCORE_WEIGHTS, AppConfig
+from polymarket_briefing.models import (
+    NormalizedOutcome,
+    ScoredOutcome,
+    outcome_haystack,
+    outcome_key,
+)
 
 
 def score_outcomes(
@@ -32,12 +28,12 @@ def score_outcomes(
     scored = [
         score_outcome(
             item,
-            deltas.get(_key(item)),
+            deltas.get(outcome_key(item)),
             config,
             observed_at,
             max_volume,
             max_liquidity,
-            already_sent=_key(item) in sent_outcome_keys,
+            already_sent=outcome_key(item) in sent_outcome_keys,
             event_recently_sent=item.event_slug in sent_event_slugs,
         )
         for item in outcomes
@@ -55,7 +51,7 @@ def score_outcome(
     already_sent: bool = False,
     event_recently_sent: bool = False,
 ) -> ScoredOutcome:
-    weights = DEFAULT_WEIGHTS | config.scoring.score_weights
+    weights = DEFAULT_SCORE_WEIGHTS | config.scoring.score_weights
     signals = {
         "change_signal": change_signal(delta_24h_pp),
         "relevance_signal": relevance_signal(outcome, config),
@@ -87,27 +83,16 @@ def change_signal(delta_24h_pp: float | None) -> float:
 
 def relevance_signal(outcome: NormalizedOutcome, config: AppConfig) -> float:
     score = 0.8 if outcome.event_slug in config.watchlist_slugs else 0.0
-    haystack = " ".join(
-        filter(
-            None,
-            [
-                outcome.event_title,
-                outcome.market_question,
-                outcome.description,
-                outcome.category,
-                outcome.subcategory,
-            ],
-        )
-    ).lower()
+    haystack = outcome_haystack(outcome)
     for profile in config.discovery.keywords.values():
         weight = float(profile.get("weight", 1.0))
         for term in profile.get("terms", []):
-            if _contains_term(haystack, str(term)):
+            if contains_term(haystack, str(term)):
                 score = max(score, min(weight, 1.0))
     return min(score, 1.0)
 
 
-def _contains_term(haystack: str, term: str) -> bool:
+def contains_term(haystack: str, term: str) -> bool:
     normalized = term.strip().lower()
     if not normalized:
         return False
@@ -132,6 +117,8 @@ def deadline_signal(outcome: NormalizedOutcome, observed_at: datetime) -> float:
     if outcome.end_date is None:
         return 0
     remaining = outcome.end_date - observed_at
+    if remaining <= timedelta(0):
+        return 0
     if remaining <= timedelta(days=7):
         return 1.0
     if remaining <= timedelta(days=30):
@@ -165,7 +152,3 @@ def reasons_for(
     if signals["deadline_signal"] >= 0.6:
         reasons.append("정산 임박")
     return reasons or ["관심도 점수"]
-
-
-def _key(outcome: NormalizedOutcome) -> tuple[str, str | None, str]:
-    return (outcome.event_slug, outcome.market_id, outcome.outcome)

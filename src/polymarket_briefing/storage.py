@@ -160,6 +160,19 @@ class BriefingStorage:
         )
         self.connection.commit()
 
+    def prune_older_than(self, cutoff: datetime) -> None:
+        cutoff_iso = cutoff.isoformat()
+        self.connection.execute(
+            "DELETE FROM outcome_snapshots WHERE observed_at < ?", (cutoff_iso,)
+        )
+        self.connection.execute(
+            "DELETE FROM sent_outcomes WHERE sent_at < ?", (cutoff_iso,)
+        )
+        self.connection.execute(
+            "DELETE FROM sent_notifications WHERE sent_at < ?", (cutoff_iso,)
+        )
+        self.connection.commit()
+
 
 def calculate_snapshot_delta_pp(
     storage: BriefingStorage, outcome: NormalizedOutcome, observed_at: datetime

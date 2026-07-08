@@ -5,8 +5,8 @@ import pytest
 from polymarket_briefing.config import AppConfig, ScoringSettings
 from polymarket_briefing.models import NormalizedOutcome
 from polymarket_briefing.scoring import (
-    _contains_term,
     change_signal,
+    contains_term,
     deadline_signal,
     log_signal,
     probability_signal,
@@ -54,6 +54,11 @@ def test_deadline_within_seven_days():
     assert deadline_signal(outcome(end_date=now + timedelta(days=2)), now) == 1.0
 
 
+def test_deadline_already_past_scores_zero():
+    now = datetime.now(UTC)
+    assert deadline_signal(outcome(end_date=now - timedelta(days=1)), now) == 0
+
+
 def test_log_signal_bounds():
     assert 0 <= log_signal(10, 100) <= 1
     assert log_signal(1000, 100) == 1
@@ -66,9 +71,9 @@ def test_probability_signal_penalizes_extremes():
 
 
 def test_keyword_matching_uses_term_boundaries():
-    assert _contains_term("gpt-5.6 released by july", "GPT-5.6")
-    assert _contains_term("spacex ipo closing market cap", "IPO")
-    assert not _contains_term("orlando magic win series", "AGI")
+    assert contains_term("gpt-5.6 released by july", "GPT-5.6")
+    assert contains_term("spacex ipo closing market cap", "IPO")
+    assert not contains_term("orlando magic win series", "AGI")
 
 
 def test_recently_sent_outcome_is_heavily_penalized():

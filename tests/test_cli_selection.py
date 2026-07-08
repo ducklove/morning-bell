@@ -1,4 +1,9 @@
-from polymarket_briefing.cli import _filter_discovery, _select_items
+from polymarket_briefing.cli import (
+    _filter_closed,
+    _filter_discovery,
+    _limit_by_event_count,
+    _select_items,
+)
 from polymarket_briefing.models import NormalizedOutcome, ScoredOutcome
 
 
@@ -55,3 +60,27 @@ def test_filter_discovery_excludes_noisy_interest_terms():
     )
 
     assert _filter_discovery([item], 1000, ["what will trump say"]) == []
+
+
+def test_limit_by_event_count_keeps_whole_events():
+    yes_a = ScoredOutcome(outcome("a", outcome="Yes"), 80)
+    no_a = ScoredOutcome(outcome("a", outcome="No"), 79)
+    yes_b = ScoredOutcome(outcome("b", outcome="Yes"), 70)
+    no_b = ScoredOutcome(outcome("b", outcome="No"), 69)
+
+    limited = _limit_by_event_count([yes_a, no_a, yes_b, no_b], max_events=1)
+
+    assert limited == [yes_a, no_a]
+
+
+def test_limit_by_event_count_under_limit_is_unchanged():
+    items = [ScoredOutcome(outcome("a"), 80), ScoredOutcome(outcome("b"), 70)]
+
+    assert _limit_by_event_count(items, max_events=5) == items
+
+
+def test_filter_closed_drops_resolved_watchlist_markets():
+    open_item = outcome("watch", closed=False)
+    closed_item = outcome("watch", market_id="m2", closed=True)
+
+    assert _filter_closed([open_item, closed_item]) == [open_item]

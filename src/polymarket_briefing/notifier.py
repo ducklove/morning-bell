@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sys
 import time
 from collections.abc import Iterable
@@ -9,12 +8,20 @@ from pathlib import Path
 import httpx
 
 from polymarket_briefing.config import NotificationSettings
+from polymarket_briefing.utils import read_secret
+
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 def send_ntfy(topic: str, title: str, message: str, priority: int = 3) -> None:
     url = f"https://ntfy.sh/{topic}"
-    headers = {"Title": title, "Priority": str(priority)}
-    response = httpx.post(url, content=message.encode("utf-8"), headers=headers, timeout=20)
+    # ntfy reads header values as raw UTF-8 bytes, which httpx will only send
+    # verbatim if given `bytes` — a plain `str` with non-ASCII characters
+    # raises UnicodeEncodeError since HTTP headers are ASCII by default.
+    headers = {"Title": title.encode("utf-8"), "Priority": str(priority).encode("ascii")}
+    response = _post_with_retries(
+        url, content=message.encode("utf-8"), headers=headers, timeout=20
+    )
     response.raise_for_status()
 
 
@@ -78,32 +85,24 @@ def notify(
 
 
 def _secret(name: str) -> str | None:
-    value = os.environ.get(name)
-    if value:
-        return value
-    aliases = {name, name.lower()}
-    if name == "NTFY_TOPIC":
-        aliases.add("ntfy")
-    path = Path("keys")
-    if not path.exists():
-        return None
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, raw_value = stripped.split("=", 1)
-        if key.strip() in aliases:
-            return raw_value.strip().strip('"').strip("'")
-    return None
+    aliases = ("ntfy",) if name == "NTFY_TOPIC" else ()
+    return read_secret(name, *aliases)
 
 
 def _post_with_retries(url: str, attempts: int = 3, **kwargs) -> httpx.Response:
     last_error: httpx.HTTPError | None = None
+    last_response: httpx.Response | None = None
     for attempt in range(attempts):
         try:
-            return httpx.post(url, **kwargs)
+            response = httpx.post(url, **kwargs)
         except httpx.HTTPError as exc:
             last_error = exc
-            if attempt + 1 < attempts:
-                time.sleep(1.5 * (2**attempt))
+        else:
+            if response.status_code not in RETRYABLE_STATUS_CODES:
+                return response
+            last_response = response
+        if attempt + 1 < attempts:
+            time.sleep(1.5 * (2**attempt))
+    if last_response is not None:
+        return last_response
     raise last_error or RuntimeError("HTTP request failed")

@@ -49,3 +49,22 @@ class Snapshot:
     liquidity: float | None
     url: str
 
+
+def outcome_key(outcome: NormalizedOutcome) -> tuple[str, str | None, str]:
+    return (outcome.event_slug, outcome.market_id, outcome.outcome)
+
+
+def outcome_haystack(outcome: NormalizedOutcome) -> str:
+    return " ".join(
+        filter(
+            None,
+            [
+                outcome.event_title,
+                outcome.market_question,
+                outcome.description,
+                outcome.category,
+                outcome.subcategory,
+            ],
+        )
+    ).lower()
+

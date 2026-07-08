@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import json
+import sys
 from datetime import timedelta
 from pathlib import Path
 from typing import Annotated
@@ -10,11 +12,11 @@ import typer
 from polymarket_briefing.ai_summary import load_openrouter_key, summarize_with_openrouter
 from polymarket_briefing.charts import build_price_charts
 from polymarket_briefing.config import load_config
-from polymarket_briefing.models import NormalizedOutcome
+from polymarket_briefing.models import NormalizedOutcome, outcome_haystack, outcome_key
 from polymarket_briefing.normalize import normalize_event, normalize_events
 from polymarket_briefing.notifier import notify
 from polymarket_briefing.polymarket_client import PolymarketClient
-from polymarket_briefing.scoring import _contains_term, score_outcomes
+from polymarket_briefing.scoring import contains_term, score_outcomes
 from polymarket_briefing.storage import (
     BriefingStorage,
     calculate_snapshot_delta_pp,
@@ -22,6 +24,16 @@ from polymarket_briefing.storage import (
 )
 from polymarket_briefing.summarize import summarize
 from polymarket_briefing.utils import utc_now
+
+
+def _ensure_utf8_console() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            with contextlib.suppress(ValueError, OSError):
+                stream.reconfigure(encoding="utf-8")
+
+
+_ensure_utf8_console()
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -49,7 +61,7 @@ def run(
             outcomes, deltas, cfg, observed_at, sent_outcome_keys, sent_event_slugs
         )
         selected = _select_items(scored, set(cfg.watchlist_slugs), cfg.scoring.min_score_to_notify)
-        selected = selected[: cfg.scoring.max_items]
+        selected = _limit_by_event_count(selected, cfg.scoring.max_items)
         message = summarize(selected, cfg.scoring.max_items, cfg.timezone)
         use_ai_summary = cfg.ai_summary.enabled if ai_summary is None else ai_summary
         if use_ai_summary:
@@ -91,7 +103,9 @@ def run(
                     storage.record_sent_outcomes([item.outcome for item in selected], observed_at)
         else:
             notify(cfg.notification, message, dry_run=effective_dry_run, attachments=attachments)
-        storage.insert_snapshots(outcomes, observed_at)
+        if not effective_dry_run:
+            storage.insert_snapshots(outcomes, observed_at)
+            storage.prune_older_than(observed_at - timedelta(days=cfg.storage.retention_days))
 
 
 @app.command("fetch-watchlist")
@@ -145,7 +159,7 @@ def _fetch_all(client: PolymarketClient, cfg) -> list[NormalizedOutcome]:
     outcomes: list[NormalizedOutcome] = []
     for slug in cfg.watchlist_slugs:
         try:
-            outcomes.extend(normalize_event(client.get_event_by_slug(slug)))
+            outcomes.extend(_filter_closed(normalize_event(client.get_event_by_slug(slug))))
         except RuntimeError as exc:
             typer.echo(f"skip watchlist {slug}: {exc}", err=True)
     if cfg.discovery.enabled:
@@ -188,8 +202,12 @@ def _calculate_deltas(
                 delta = None
         if delta is None:
             delta = calculate_snapshot_delta_pp(storage, outcome, observed_at)
-        deltas[_key(outcome)] = delta
+        deltas[outcome_key(outcome)] = delta
     return deltas
+
+
+def _filter_closed(outcomes: list[NormalizedOutcome]) -> list[NormalizedOutcome]:
+    return [item for item in outcomes if item.closed is not True]
 
 
 def _filter_discovery(
@@ -208,26 +226,15 @@ def _filter_discovery(
 
 
 def _matches_excluded_interest(outcome: NormalizedOutcome, exclude_terms: list[str]) -> bool:
-    haystack = " ".join(
-        filter(
-            None,
-            [
-                outcome.event_title,
-                outcome.market_question,
-                outcome.description,
-                outcome.category,
-                outcome.subcategory,
-            ],
-        )
-    ).lower()
-    return any(_contains_term(haystack, term) for term in exclude_terms)
+    haystack = outcome_haystack(outcome)
+    return any(contains_term(haystack, term) for term in exclude_terms)
 
 
 def _dedupe_outcomes(outcomes: list[NormalizedOutcome]) -> list[NormalizedOutcome]:
     seen = set()
     deduped = []
     for item in outcomes:
-        key = _key(item)
+        key = outcome_key(item)
         if key not in seen:
             seen.add(key)
             deduped.append(item)
@@ -278,8 +285,22 @@ def _top_event_items(items: list, max_markets: int = 3) -> list:
     return selected
 
 
-def _key(outcome: NormalizedOutcome) -> tuple[str, str | None, str]:
-    return (outcome.event_slug, outcome.market_id, outcome.outcome)
+def _limit_by_event_count(selected: list, max_events: int) -> list:
+    """Truncate by distinct event count, not raw item count.
+
+    `selected` is already ordered so a market's outcomes stay adjacent; cutting
+    by item count could otherwise split a Yes/No pair mid-market.
+    """
+    seen_slugs: list[str] = []
+    limited = []
+    for item in selected:
+        slug = item.outcome.event_slug
+        if slug not in seen_slugs:
+            if len(seen_slugs) >= max_events:
+                break
+            seen_slugs.append(slug)
+        limited.append(item)
+    return limited
 
 
 def _as_dict(outcome: NormalizedOutcome) -> dict[str, object]:

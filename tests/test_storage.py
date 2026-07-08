@@ -59,3 +59,25 @@ def test_recently_sent_outcome_keys_respect_window(tmp_path):
         )
 
         assert storage.recently_sent_outcome_keys(now, days_back=7) == {("slug", "m1", "Yes")}
+
+
+def test_prune_older_than_removes_stale_rows_only(tmp_path):
+    now = datetime.now(UTC)
+    with BriefingStorage(str(tmp_path / "state.sqlite")) as storage:
+        storage.insert_snapshots([sample_outcome()], now - timedelta(days=40))
+        storage.insert_snapshots([sample_outcome()], now - timedelta(days=1))
+        storage.record_sent_outcomes([sample_outcome(market_id="old")], now - timedelta(days=40))
+        storage.record_sent_outcomes([sample_outcome(market_id="recent")], now - timedelta(days=1))
+        storage.record_notification("stale-key", "title", now - timedelta(days=40))
+        storage.record_notification("recent-key", "title", now - timedelta(days=1))
+
+        storage.prune_older_than(now - timedelta(days=30))
+
+        remaining_snapshots = storage.connection.execute(
+            "SELECT COUNT(*) FROM outcome_snapshots"
+        ).fetchone()[0]
+        remaining_sent = storage.recently_sent_outcome_keys(now, days_back=365)
+        assert remaining_snapshots == 1
+        assert remaining_sent == {("slug", "recent", "Yes")}
+        assert storage.notification_sent("stale-key") is False
+        assert storage.notification_sent("recent-key") is True

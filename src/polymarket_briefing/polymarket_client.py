@@ -73,11 +73,13 @@ class PolymarketClient:
         return [item for item in data if isinstance(item, dict)]
 
     def get_price_history(
-        self, token_id: str, start_ts: int, end_ts: int, interval: str = "1d"
+        self, token_id: str, start_ts: int, end_ts: int, interval: str | None = None
     ) -> dict[str, Any]:
+        # The CLOB API ignores startTs/endTs and returns a fixed recent window
+        # whenever `interval` is present, so omit it to honor the requested range.
         url = f"{self.settings.clob_base_url.rstrip('/')}/prices-history"
-        data = self._get_json(
-            url,
-            {"market": token_id, "startTs": start_ts, "endTs": end_ts, "interval": interval},
-        )
+        params: dict[str, Any] = {"market": token_id, "startTs": start_ts, "endTs": end_ts}
+        if interval:
+            params["interval"] = interval
+        data = self._get_json(url, params)
         return data if isinstance(data, dict) else {}
