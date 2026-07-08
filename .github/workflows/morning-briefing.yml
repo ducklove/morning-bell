@@ -1,10 +1,11 @@
 name: Polymarket Morning Briefing
 
+# The daily 08:07 KST run now happens on the home server via a systemd user
+# timer (see systemd/polymarket-briefing.timer), which also auto-deploys on
+# push. This workflow is kept for manual/on-demand runs only — a `schedule`
+# trigger here would send duplicate notifications alongside the server.
 on:
   workflow_dispatch:
-  schedule:
-    # 23:07 UTC is 08:07 KST.
-    - cron: "7 23 * * *"
 
 concurrency:
   group: morning-briefing
