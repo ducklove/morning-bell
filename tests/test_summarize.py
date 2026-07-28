@@ -137,6 +137,20 @@ def test_summary_translates_hormuz_ship_count_market():
     assert "예 55.0%" in text
 
 
+def test_summary_uses_euro_particle_after_consonant_ending_stance():
+    outcome = NormalizedOutcome(**{**sample_outcome().__dict__, "probability": 0.5})
+    text = summarize([ScoredOutcome(outcome, 80, None, ("watchlist",))], max_items=7)
+    assert "찬반이 팽팽한 구간으로 보고 있습니다" in text
+    assert "구간로" not in text
+
+
+def test_summary_uses_ro_particle_after_vowel_ending_stance():
+    outcome = NormalizedOutcome(**{**sample_outcome().__dict__, "probability": 0.8})
+    text = summarize([ScoredOutcome(outcome, 80, None, ("watchlist",))], max_items=7)
+    assert "긍정 쪽이 우세로 보고 있습니다" in text
+    assert "우세으로" not in text
+
+
 def test_summary_translates_sports_versus_title():
     outcome = NormalizedOutcome(
         **{

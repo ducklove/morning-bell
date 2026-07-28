@@ -3,14 +3,14 @@ from __future__ import annotations
 import contextlib
 import json
 import sys
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
 from polymarket_briefing.ai_summary import load_openrouter_key, summarize_with_openrouter
-from polymarket_briefing.charts import build_price_charts
+from polymarket_briefing.charts import build_price_charts, history_points
 from polymarket_briefing.config import load_config
 from polymarket_briefing.models import NormalizedOutcome, outcome_haystack, outcome_key
 from polymarket_briefing.normalize import normalize_event, normalize_events
@@ -35,6 +35,12 @@ def _ensure_utf8_console() -> None:
 
 _ensure_utf8_console()
 
+# Ask the CLOB for a little more than 24h so a point on either side of the
+# 24h mark exists; the reference point is then chosen by proximity.
+CLOB_HISTORY_WINDOW_HOURS = 26
+DELTA_TARGET_HOURS = 24
+DELTA_TOLERANCE_HOURS = 6
+
 app = typer.Typer(no_args_is_help=True)
 
 
@@ -51,7 +57,7 @@ def run(
     cfg = load_config(config)
     observed_at = utc_now()
     with PolymarketClient(cfg.polymarket) as client, BriefingStorage(cfg.storage.path) as storage:
-        outcomes = _fetch_all(client, cfg)
+        outcomes, stale_slugs = _fetch_all(client, cfg)
         deltas = _calculate_deltas(client, storage, outcomes, observed_at, set(cfg.watchlist_slugs))
         sent_outcome_keys = storage.recently_sent_outcome_keys(
             observed_at, cfg.scoring.sent_penalty_days
@@ -77,6 +83,8 @@ def run(
                 timeout_seconds=cfg.ai_summary.timeout_seconds,
                 backoff_seconds=cfg.ai_summary.backoff_seconds,
             )
+        # After the AI pass so the notice cannot be paraphrased away.
+        message = _with_stale_watchlist_notice(message, stale_slugs)
         effective_dry_run = dry_run or cfg.notification.dry_run_default
         attachments = []
         if cfg.notification.provider.lower() == "telegram":
@@ -155,13 +163,27 @@ def test_notify(
     notify(cfg.notification, "테스트 알림입니다", dry_run=dry_run)
 
 
-def _fetch_all(client: PolymarketClient, cfg) -> list[NormalizedOutcome]:
+def _fetch_all(client: PolymarketClient, cfg) -> tuple[list[NormalizedOutcome], list[str]]:
+    """Fetch watchlist + discovery outcomes, and report unusable watchlist slugs.
+
+    A watchlist event that has fully resolved still returns HTTP 200, so it is
+    dropped by `_filter_closed` without raising. Left unreported that looks
+    identical to a healthy run, which is how the whole watchlist can go stale
+    unnoticed — so surface those slugs to the caller.
+    """
     outcomes: list[NormalizedOutcome] = []
+    stale_slugs: list[str] = []
     for slug in cfg.watchlist_slugs:
         try:
-            outcomes.extend(_filter_closed(normalize_event(client.get_event_by_slug(slug))))
+            live = _filter_closed(normalize_event(client.get_event_by_slug(slug)))
         except RuntimeError as exc:
             typer.echo(f"skip watchlist {slug}: {exc}", err=True)
+            stale_slugs.append(slug)
+            continue
+        if not live:
+            typer.echo(f"warning: watchlist {slug} has no open markets", err=True)
+            stale_slugs.append(slug)
+        outcomes.extend(live)
     if cfg.discovery.enabled:
         try:
             events = client.list_active_events(limit=cfg.discovery.max_events)
@@ -174,7 +196,24 @@ def _fetch_all(client: PolymarketClient, cfg) -> list[NormalizedOutcome]:
             )
         except RuntimeError as exc:
             typer.echo(f"skip discovery: {exc}", err=True)
-    return _dedupe_outcomes(outcomes)
+    return _dedupe_outcomes(outcomes), stale_slugs
+
+
+def _with_stale_watchlist_notice(message: str, stale_slugs: list[str]) -> str:
+    """Surface stale watchlist slugs in the briefing itself.
+
+    stderr alone is invisible on a timer-driven run, so the notice has to ride
+    along with the notification the user actually reads.
+    """
+    if not stale_slugs:
+        return message
+    notice = f"[점검] 워치리스트 {len(stale_slugs)}개가 종료됨: {', '.join(stale_slugs)}"
+    lines = message.splitlines()
+    for index, line in enumerate(lines):
+        if line.startswith("꼬리표:"):
+            lines[index:index] = [notice, ""]
+            return "\n".join(lines)
+    return "\n".join([*lines, notice])
 
 
 def _calculate_deltas(
@@ -185,25 +224,44 @@ def _calculate_deltas(
     watchlist_slugs: set[str],
 ) -> dict[tuple[str, str | None, str], float | None]:
     deltas = {}
-    start = int((observed_at - timedelta(hours=26)).timestamp())
+    start = int((observed_at - timedelta(hours=CLOB_HISTORY_WINDOW_HOURS)).timestamp())
     end = int(observed_at.timestamp())
+    target = observed_at - timedelta(hours=DELTA_TARGET_HOURS)
     for outcome in outcomes:
         delta = None
         use_clob_history = outcome.event_slug in watchlist_slugs
         if use_clob_history and outcome.token_id and outcome.probability is not None:
             try:
                 history = client.get_price_history(outcome.token_id, start, end)
-                prices = history.get("history") or history.get("prices") or []
-                if prices:
-                    first = prices[0].get("p") if isinstance(prices[0], dict) else None
-                    old_probability = float(first)
-                    delta = (outcome.probability - old_probability) * 100
+                reference = _reference_probability(history_points(history), target)
+                if reference is not None:
+                    delta = (outcome.probability - reference) * 100
             except Exception:
                 delta = None
         if delta is None:
             delta = calculate_snapshot_delta_pp(storage, outcome, observed_at)
         deltas[outcome_key(outcome)] = delta
     return deltas
+
+
+def _reference_probability(
+    points: list[tuple[datetime, float]], target: datetime
+) -> float | None:
+    """Return the observed price closest to `target`, or None if none is close.
+
+    The CLOB window is requested wider than 24h so a point spanning the target
+    exists. Taking `points[0]` would silently compare against the oldest point
+    in that wider window — reporting a 26h move under a "24시간 전보다" label —
+    so pick the nearest point and drop the delta when nothing lands in range.
+    """
+    if not points:
+        return None
+    nearest_at, nearest_price = min(
+        points, key=lambda point: abs((point[0] - target).total_seconds())
+    )
+    if abs((nearest_at - target).total_seconds()) > DELTA_TOLERANCE_HOURS * 3600:
+        return None
+    return nearest_price
 
 
 def _filter_closed(outcomes: list[NormalizedOutcome]) -> list[NormalizedOutcome]:

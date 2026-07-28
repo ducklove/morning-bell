@@ -248,6 +248,26 @@ def _reason_label(reason: str) -> str:
     return labels.get(reason, reason)
 
 
+_HANGUL_SYLLABLE_START = 0xAC00
+_HANGUL_SYLLABLE_END = 0xD7A3
+_HANGUL_JONGSEONG_COUNT = 28
+_JONGSEONG_NONE = 0
+_JONGSEONG_RIEUL = 8
+
+
+def _ro_particle(word: str) -> str:
+    """Return "으로" or "로" so the particle agrees with the last syllable of ``word``."""
+    if not word:
+        return "로"
+    code = ord(word[-1])
+    if not _HANGUL_SYLLABLE_START <= code <= _HANGUL_SYLLABLE_END:
+        return "로"
+    jongseong_index = (code - _HANGUL_SYLLABLE_START) % _HANGUL_JONGSEONG_COUNT
+    if jongseong_index in (_JONGSEONG_NONE, _JONGSEONG_RIEUL):
+        return "로"
+    return "으로"
+
+
 def _trend_explanation(group: list[ScoredOutcome]) -> str | None:
     yes_item = next((item for item in group if item.outcome.outcome.lower() == "yes"), None)
     if yes_item is None or yes_item.outcome.probability is None:
@@ -256,7 +276,7 @@ def _trend_explanation(group: list[ScoredOutcome]) -> str | None:
     delta = yes_item.delta_24h_pp
     stance = _stance(probability)
     if delta is None:
-        return f"현재 시장은 {stance}로 보고 있습니다."
+        return f"현재 시장은 {stance}{_ro_particle(stance)} 보고 있습니다."
     if delta > 0:
         direction = "올랐습니다"
     elif delta < 0:

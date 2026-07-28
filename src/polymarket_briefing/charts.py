@@ -57,7 +57,7 @@ def _build_chart(
     start_ts = int((observed_at - timedelta(days=7)).timestamp())
     end_ts = int(observed_at.timestamp())
     history = client.get_price_history(item.outcome.token_id or "", start_ts, end_ts)
-    points = _history_points(history)
+    points = history_points(history)
     if item.outcome.probability is not None:
         points.append((observed_at, item.outcome.probability))
     if len(points) < 2:
@@ -85,7 +85,12 @@ def _build_chart(
     return file_path
 
 
-def _history_points(history: dict) -> list[tuple[datetime, float]]:
+def history_points(history: dict) -> list[tuple[datetime, float]]:
+    """Parse a CLOB `/prices-history` payload into (time, price) pairs.
+
+    Malformed entries are skipped rather than failing the whole run, since the
+    payload shape varies between the `history` and `prices` response forms.
+    """
     raw_points = history.get("history") or history.get("prices") or []
     points: list[tuple[datetime, float]] = []
     for raw in raw_points:

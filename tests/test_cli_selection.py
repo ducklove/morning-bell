@@ -1,8 +1,12 @@
+from datetime import UTC, datetime, timedelta
+
 from polymarket_briefing.cli import (
     _filter_closed,
     _filter_discovery,
     _limit_by_event_count,
+    _reference_probability,
     _select_items,
+    _with_stale_watchlist_notice,
 )
 from polymarket_briefing.models import NormalizedOutcome, ScoredOutcome
 
@@ -84,3 +88,38 @@ def test_filter_closed_drops_resolved_watchlist_markets():
     closed_item = outcome("watch", market_id="m2", closed=True)
 
     assert _filter_closed([open_item, closed_item]) == [open_item]
+
+
+def test_reference_probability_picks_point_nearest_target():
+    target = datetime(2026, 7, 28, 0, 0, tzinfo=UTC)
+    points = [
+        (target - timedelta(hours=2), 0.10),
+        (target + timedelta(minutes=5), 0.42),
+        (target + timedelta(hours=2), 0.90),
+    ]
+
+    assert _reference_probability(points, target) == 0.42
+
+
+def test_reference_probability_rejects_points_outside_tolerance():
+    target = datetime(2026, 7, 28, 0, 0, tzinfo=UTC)
+    far = [(target - timedelta(hours=12), 0.42)]
+
+    assert _reference_probability(far, target) is None
+    assert _reference_probability([], target) is None
+
+
+def test_stale_watchlist_notice_sits_above_disclaimer():
+    message = "1) 항목\n링크: https://x\n\n꼬리표: 정보 요약이며 투자 조언이 아닙니다."
+
+    result = _with_stale_watchlist_notice(message, ["dead-slug"])
+    lines = result.splitlines()
+
+    assert lines[-1].startswith("꼬리표:")
+    assert "[점검] 워치리스트 1개가 종료됨: dead-slug" in result
+
+
+def test_stale_watchlist_notice_is_absent_when_watchlist_is_healthy():
+    message = "1) 항목\n꼬리표: 정보 요약이며 투자 조언이 아닙니다."
+
+    assert _with_stale_watchlist_notice(message, []) == message

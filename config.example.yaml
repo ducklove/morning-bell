@@ -8,9 +8,15 @@ polymarket:
   max_retries: 3
   backoff_seconds: 1.5
 
+# Prediction markets resolve and disappear, so these need periodic review.
+# A slug whose markets have all closed is reported in the briefing as
+# "[점검] 워치리스트 N개가 종료됨" rather than failing silently.
+# Verified live 2026-07-28.
 watchlist_slugs:
-  - which-company-has-the-best-ai-model-end-of-may
-  - strait-of-hormuz-traffic-returns-to-normal-by-end-of-may
+  - largest-company-end-of-december-2026
+  - strait-of-hormuz-traffic-returns-to-normal-by-august-31-20260702154212320
+  - next-claude-opus-text-arena-debut-20260714204425670
+  - us-announces-halt-in-iran-offensive-operations-byptptpt-20260718015003096
 
 discovery:
   enabled: true

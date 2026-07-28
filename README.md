@@ -18,7 +18,9 @@ pip install -e ".[dev]"
 cp config.example.yaml config.yaml
 ```
 
-`config.yaml`에서 watchlist slug, discovery keyword, 점수 기준, 알림 provider를 조정합니다. 민감정보는 파일에 쓰지 말고 환경변수나 GitHub Secrets로만 설정합니다.
+`config.yaml`에서 watchlist slug, discovery keyword, 점수 기준, 알림 provider를 조정합니다. 민감정보는 `config.yaml`에 쓰지 말고 환경변수나 GitHub Secrets로 설정합니다.
+
+시크릿은 환경변수를 먼저 읽고, 값이 없으면 저장소 루트의 `keys` 파일에서 `NAME=value` 형식으로 찾습니다. `#`으로 시작하는 줄은 무시하고 이름은 대소문자를 구분하지 않으며, `NTFY_TOPIC`은 `ntfy`, `OPENROUTER_API_KEY`는 `openrouter`라는 이름으로도 인식합니다. `keys`는 `.gitignore`에 포함되어 있고 절대 커밋하지 않습니다.
 
 ## ntfy 설정
 
@@ -65,12 +67,15 @@ polymarket-briefing discover --config config.example.yaml
 
 - `NTFY_TOPIC`
 - `TELEGRAM_BOT_TOKEN`과 `TELEGRAM_CHAT_ID`는 Telegram 사용 시에만 필요
+- `OPENROUTER_API_KEY`는 AI 요약 사용 시에만 필요. 워크플로는 `--ai-summary`로 실행하므로 수동 실행에는 필수입니다
 
-워크플로는 매일 23:07 UTC에 실행됩니다. 이는 KST 08:07입니다. 실행 후 `state/`의 SQLite snapshot을 커밋해 다음 실행에서 24시간 전 확률 변화량을 계산합니다.
+워크플로에는 `workflow_dispatch:` 트리거만 있어 수동 실행 전용입니다. 매일 08:07 KST 정기 실행은 홈서버 systemd 타이머가 담당하며, 워크플로에 `schedule:` 트리거를 두면 홈서버 알림과 중복 발송되기 때문에 두지 않습니다.
 
 ## 상태 저장
 
 기본 DB는 `state/briefing_state.sqlite`입니다. `outcome_snapshots`에 공개 시장 스냅샷만 저장하고, `sent_notifications`로 같은 날짜의 중복 발송을 줄입니다. topic, token, 개인키 같은 민감정보는 저장하지 않습니다.
+
+`state/`는 `.gitignore` 대상이라 평소에는 커밋되지 않습니다. 워크플로의 `Persist state snapshot` 단계가 `git add -f`로 스냅샷을 강제 커밋하지만, 이는 수동 실행이 있을 때만 일어납니다. 매일 도는 정기 경로에서는 24시간 전 확률 변화량 기준값을 홈서버의 로컬 SQLite 파일에서 읽습니다.
 
 ## 검증
 
