@@ -61,6 +61,16 @@ polymarket-briefing fetch-watchlist --config config.example.yaml
 polymarket-briefing discover --config config.example.yaml
 ```
 
+## 배포/운영
+
+매일 08:07 KST 정기 실행은 홈서버(`pi-control`)의 systemd user timer가 담당합니다. unit 파일과 배포 스크립트는 [`systemd/`](systemd/)에 있으며, **실제 서버에서 그대로 가져온 것**입니다.
+
+**배포는 `main`에 push하면 끝납니다.** 서버의 `polymarket-briefing-deploy.timer`가 2분마다 `origin/main`을 폴링해 새 커밋을 자동으로 받아갑니다. 최초 설치, 확인, 롤백 절차는 [`systemd/README.md`](systemd/README.md)에 있습니다.
+
+한 가지 주의할 점이 있습니다.
+
+- `config.yaml`은 `.gitignore` 대상이라 배포로 갱신되지 않습니다. watchlist slug나 점수 기준을 바꿨다면 서버의 `config.yaml`을 `config.example.yaml`과 직접 대조해 병합해야 합니다. 특히 **설정 키를 제거하는 변경은 코드보다 서버 `config.yaml`을 먼저** 고쳐야 합니다 — 알 수 없는 키는 `ValueError`로 즉시 실패하므로 다음 실행이 통째로 죽습니다.
+
 ## GitHub Actions
 
 저장소 Secrets에 다음 값을 등록합니다.

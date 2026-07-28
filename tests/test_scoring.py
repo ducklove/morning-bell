@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from polymarket_briefing.config import AppConfig, ScoringSettings
-from polymarket_briefing.models import NormalizedOutcome
+from polymarket_briefing.models import NormalizedOutcome, ReasonCode
 from polymarket_briefing.scoring import (
     change_signal,
     contains_term,
@@ -86,7 +86,7 @@ def test_recently_sent_outcome_is_heavily_penalized():
     penalized = score_outcome(outcome(), 10.0, cfg, now, 50, 10, already_sent=True)
 
     assert penalized.score == pytest.approx(original.score * 0.2)
-    assert "최근 발송" in penalized.reasons
+    assert ReasonCode.RECENTLY_SENT in penalized.reasons
 
 
 def test_recently_sent_event_is_penalized_less_than_exact_outcome():
@@ -117,6 +117,6 @@ def test_recently_sent_event_is_penalized_less_than_exact_outcome():
     )
 
     assert penalized.score == pytest.approx(original.score * 0.6)
-    assert "최근 이벤트" in penalized.reasons
+    assert ReasonCode.EVENT_RECENTLY_SENT in penalized.reasons
     assert exact.score == pytest.approx(original.score * 0.2)
-    assert "최근 이벤트" not in exact.reasons
+    assert ReasonCode.EVENT_RECENTLY_SENT not in exact.reasons

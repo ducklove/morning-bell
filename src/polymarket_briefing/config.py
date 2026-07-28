@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import yaml
 
@@ -14,6 +14,9 @@ class PolymarketSettings:
     request_timeout_seconds: float = 20
     max_retries: int = 3
     backoff_seconds: float = 1.5
+    # Gamma API caps a single /events request at 100 items; discovery pages
+    # through repeated requests until it reaches discovery.max_events.
+    page_size: int = 100
 
 
 @dataclass(frozen=True)
@@ -45,6 +48,12 @@ class ScoringSettings:
     sent_penalty_days: int = 7
     sent_penalty_factor: float = 0.25
     sent_event_penalty_factor: float = 0.60
+    # Outcomes below this probability are hopeless long shots (e.g. a 0.1%
+    # candidate) and are hidden from the briefing body.
+    min_probability_to_show: float = 0.03
+    # Collapse near-duplicate events on the same topic (e.g. "Largest Company
+    # end of July" vs. "... end of August") down to this many per topic.
+    max_events_per_topic: int = 1
     score_weights: dict[str, float] = field(default_factory=dict)
 
 
@@ -68,14 +77,12 @@ class NotificationSettings:
 @dataclass(frozen=True)
 class StorageSettings:
     path: str = "state/briefing_state.sqlite"
-    snapshot_dir: str = "state/snapshots"
     retention_days: int = 30
 
 
 @dataclass(frozen=True)
 class AppConfig:
     timezone: str = "Asia/Seoul"
-    run_time_local: str = "08:07"
     polymarket: PolymarketSettings = field(default_factory=PolymarketSettings)
     watchlist_slugs: list[str] = field(default_factory=list)
     discovery: DiscoverySettings = field(default_factory=DiscoverySettings)
@@ -85,28 +92,46 @@ class AppConfig:
     storage: StorageSettings = field(default_factory=StorageSettings)
 
 
+SettingsT = TypeVar("SettingsT")
+
+
 def load_config(path: str | Path) -> AppConfig:
     with Path(path).open(encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
-    scoring_raw = dict(raw.get("scoring", {}))
-    _validate_score_weights(scoring_raw.get("score_weights", {}))
+    _reject_unknown_keys(raw, _valid_keys(AppConfig), "top-level config")
+    scoring_raw = dict(raw.get("scoring") or {})
+    _validate_score_weights(scoring_raw.get("score_weights") or {})
     return AppConfig(
         timezone=raw.get("timezone", "Asia/Seoul"),
-        run_time_local=raw.get("run_time_local", "08:07"),
-        polymarket=PolymarketSettings(**raw.get("polymarket", {})),
-        watchlist_slugs=list(raw.get("watchlist_slugs", [])),
-        discovery=DiscoverySettings(**raw.get("discovery", {})),
-        scoring=ScoringSettings(**scoring_raw),
-        ai_summary=AiSummarySettings(**raw.get("ai_summary", {})),
-        notification=NotificationSettings(**raw.get("notification", {})),
-        storage=StorageSettings(**raw.get("storage", {})),
+        polymarket=_build(PolymarketSettings, raw.get("polymarket"), "polymarket"),
+        watchlist_slugs=list(raw.get("watchlist_slugs") or []),
+        discovery=_build(DiscoverySettings, raw.get("discovery"), "discovery"),
+        scoring=_build(ScoringSettings, scoring_raw, "scoring"),
+        ai_summary=_build(AiSummarySettings, raw.get("ai_summary"), "ai_summary"),
+        notification=_build(NotificationSettings, raw.get("notification"), "notification"),
+        storage=_build(StorageSettings, raw.get("storage"), "storage"),
     )
 
 
-def _validate_score_weights(score_weights: dict[str, float]) -> None:
-    unknown = set(score_weights) - set(DEFAULT_SCORE_WEIGHTS)
+def _valid_keys(settings_cls: type) -> list[str]:
+    """Valid config keys for a settings dataclass, derived from its fields."""
+    return [f.name for f in fields(settings_cls)]
+
+
+def _build(settings_cls: type[SettingsT], section_raw: Any, section: str) -> SettingsT:
+    """Build a settings dataclass from raw YAML, rejecting unknown keys."""
+    values = dict(section_raw or {})
+    _reject_unknown_keys(values, _valid_keys(settings_cls), section)
+    return settings_cls(**values)
+
+
+def _reject_unknown_keys(values: Any, valid_keys: list[str], section: str) -> None:
+    unknown = set(values or {}) - set(valid_keys)
     if unknown:
         raise ValueError(
-            f"Unknown scoring.score_weights keys: {sorted(unknown)}. "
-            f"Valid keys: {sorted(DEFAULT_SCORE_WEIGHTS)}"
+            f"Unknown {section} keys: {sorted(unknown)}. Valid keys: {sorted(valid_keys)}"
         )
+
+
+def _validate_score_weights(score_weights: dict[str, float]) -> None:
+    _reject_unknown_keys(score_weights, list(DEFAULT_SCORE_WEIGHTS), "scoring.score_weights")

@@ -1,0 +1,11 @@
+[Unit]
+Description=Polymarket morning briefing
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/cantabile/Works/morning-bell
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/cantabile/Works/morning-bell/.venv/bin/polymarket-briefing run --config /home/cantabile/Works/morning-bell/config.yaml
+TimeoutStartSec=10min

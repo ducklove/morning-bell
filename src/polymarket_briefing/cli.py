@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import sys
 from datetime import datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 from typing import Annotated
 
@@ -12,7 +14,12 @@ import typer
 from polymarket_briefing.ai_summary import load_openrouter_key, summarize_with_openrouter
 from polymarket_briefing.charts import build_price_charts, history_points
 from polymarket_briefing.config import load_config
-from polymarket_briefing.models import NormalizedOutcome, outcome_haystack, outcome_key
+from polymarket_briefing.models import (
+    NormalizedOutcome,
+    ReasonCode,
+    outcome_haystack,
+    outcome_key,
+)
 from polymarket_briefing.normalize import normalize_event, normalize_events
 from polymarket_briefing.notifier import notify
 from polymarket_briefing.polymarket_client import PolymarketClient
@@ -41,6 +48,12 @@ CLOB_HISTORY_WINDOW_HOURS = 26
 DELTA_TARGET_HOURS = 24
 DELTA_TOLERANCE_HOURS = 6
 
+# Price history costs one request per outcome, so cap how many we buy per run
+# and spread them across events rather than draining the budget on one event
+# that happens to have dozens of markets.
+CLOB_DELTA_BUDGET = 60
+CLOB_DELTA_MARKETS_PER_EVENT = 3
+
 app = typer.Typer(no_args_is_help=True)
 
 
@@ -58,22 +71,35 @@ def run(
     observed_at = utc_now()
     with PolymarketClient(cfg.polymarket) as client, BriefingStorage(cfg.storage.path) as storage:
         outcomes, stale_slugs = _fetch_all(client, cfg)
-        deltas = _calculate_deltas(client, storage, outcomes, observed_at, set(cfg.watchlist_slugs))
+        watchlist_slugs = set(cfg.watchlist_slugs)
         sent_outcome_keys = storage.recently_sent_outcome_keys(
             observed_at, cfg.scoring.sent_penalty_days
         )
         sent_event_slugs = {event_slug for event_slug, _market_id, _outcome in sent_outcome_keys}
+        # Score once on local snapshots to rank candidates, then spend the price
+        # history budget on the leaders and score again with the real 24h moves.
+        deltas = _snapshot_deltas(storage, outcomes, observed_at)
+        provisional = score_outcomes(
+            outcomes, deltas, cfg, observed_at, sent_outcome_keys, sent_event_slugs
+        )
+        deltas = _enrich_with_clob_deltas(
+            client, provisional, deltas, observed_at, watchlist_slugs
+        )
         scored = score_outcomes(
             outcomes, deltas, cfg, observed_at, sent_outcome_keys, sent_event_slugs
         )
-        selected = _select_items(scored, set(cfg.watchlist_slugs), cfg.scoring.min_score_to_notify)
+        selected = _select_items(scored, watchlist_slugs, cfg.scoring.min_score_to_notify)
         selected = _limit_by_event_count(selected, cfg.scoring.max_items)
+        selected = _collapse_similar_events(selected, cfg.scoring.max_events_per_topic)
+        selected = _hide_no_hope_outcomes(selected, cfg.scoring.min_probability_to_show)
         message = summarize(selected, cfg.scoring.max_items, cfg.timezone)
         use_ai_summary = cfg.ai_summary.enabled if ai_summary is None else ai_summary
-        if use_ai_summary:
-            api_key = load_openrouter_key()
-            if not api_key:
-                raise RuntimeError("OPENROUTER_API_KEY or keys openrouter entry is required")
+        api_key = load_openrouter_key() if use_ai_summary else None
+        if use_ai_summary and not api_key:
+            # A missing key must not cost the user their whole briefing; the
+            # deterministic Korean summary is a usable, if clumsier, fallback.
+            typer.echo("warning: no OpenRouter key found; using deterministic summary", err=True)
+        if use_ai_summary and api_key:
             message = summarize_with_openrouter(
                 selected,
                 message,
@@ -89,31 +115,60 @@ def run(
         attachments = []
         if cfg.notification.provider.lower() == "telegram":
             attachments = build_price_charts(client, selected, observed_at)
-        if selected:
-            top = selected[0]
-            key = dedupe_key_for(
-                observed_at,
-                top.outcome.event_slug,
-                top.outcome.market_id,
-                top.outcome.outcome,
-                top.outcome.probability,
-                top.delta_24h_pp,
+        try:
+            _deliver(
+                cfg, storage, message, selected, observed_at, effective_dry_run, attachments
             )
-            if effective_dry_run or not storage.notification_sent(key):
-                notify(
-                    cfg.notification,
-                    message,
-                    dry_run=effective_dry_run,
-                    attachments=attachments,
+        finally:
+            # Snapshots are tomorrow's delta baseline, so persist them even when
+            # delivery fails — otherwise one bad morning also blinds the next.
+            if not effective_dry_run:
+                storage.insert_snapshots(outcomes, observed_at)
+                storage.prune_older_than(
+                    observed_at - timedelta(days=cfg.storage.retention_days)
                 )
-                if not effective_dry_run:
-                    storage.record_notification(key, "Polymarket 아침 브리핑", observed_at)
-                    storage.record_sent_outcomes([item.outcome for item in selected], observed_at)
-        else:
-            notify(cfg.notification, message, dry_run=effective_dry_run, attachments=attachments)
-        if not effective_dry_run:
-            storage.insert_snapshots(outcomes, observed_at)
-            storage.prune_older_than(observed_at - timedelta(days=cfg.storage.retention_days))
+
+
+def _deliver(
+    cfg,
+    storage: BriefingStorage,
+    message: str,
+    selected: list,
+    observed_at: datetime,
+    effective_dry_run: bool,
+    attachments: list,
+) -> None:
+    key = _briefing_dedupe_key(observed_at, selected)
+    if not effective_dry_run and storage.notification_sent(key):
+        return
+    notify(cfg.notification, message, dry_run=effective_dry_run, attachments=attachments)
+    if effective_dry_run:
+        return
+    storage.record_notification(key, "Polymarket 아침 브리핑", observed_at)
+    storage.record_sent_outcomes([item.outcome for item in selected], observed_at)
+
+
+def _briefing_dedupe_key(observed_at: datetime, selected: list) -> str:
+    """Derive one key from the whole briefing, not just its top item.
+
+    Keying on `selected[0]` alone meant a day where only the lower items changed
+    counted as a duplicate, while a 0.1pp wobble in the top item forced a resend.
+    An empty briefing also needs a key so repeated runs do not resend it.
+    """
+    if not selected:
+        return dedupe_key_for(observed_at, "", None, "empty", None, None)
+    parts = [
+        dedupe_key_for(
+            observed_at,
+            item.outcome.event_slug,
+            item.outcome.market_id,
+            item.outcome.outcome,
+            item.outcome.probability,
+            item.delta_24h_pp,
+        )
+        for item in selected
+    ]
+    return sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
 @app.command("fetch-watchlist")
@@ -216,32 +271,75 @@ def _with_stale_watchlist_notice(message: str, stale_slugs: list[str]) -> str:
     return "\n".join([*lines, notice])
 
 
-def _calculate_deltas(
-    client: PolymarketClient,
-    storage: BriefingStorage,
-    outcomes: list[NormalizedOutcome],
-    observed_at,
-    watchlist_slugs: set[str],
+def _snapshot_deltas(
+    storage: BriefingStorage, outcomes: list[NormalizedOutcome], observed_at: datetime
 ) -> dict[tuple[str, str | None, str], float | None]:
-    deltas = {}
+    return {
+        outcome_key(item): calculate_snapshot_delta_pp(storage, item, observed_at)
+        for item in outcomes
+    }
+
+
+def _enrich_with_clob_deltas(
+    client: PolymarketClient,
+    provisional: list,
+    deltas: dict[tuple[str, str | None, str], float | None],
+    observed_at: datetime,
+    watchlist_slugs: set[str],
+    budget: int = CLOB_DELTA_BUDGET,
+) -> dict[tuple[str, str | None, str], float | None]:
+    """Replace snapshot deltas with real CLOB history for the strongest candidates.
+
+    A snapshot delta needs a prior run to compare against, so on a fresh database
+    the change signal — the single heaviest scoring weight — is uniformly zero and
+    the ranking silently degrades to volume and keywords. CLOB price history gives
+    a true 24h move with no local state at all, but costs one request per outcome,
+    so the budget goes to watchlist items first and then down the provisional
+    ranking.
+    """
     start = int((observed_at - timedelta(hours=CLOB_HISTORY_WINDOW_HOURS)).timestamp())
     end = int(observed_at.timestamp())
     target = observed_at - timedelta(hours=DELTA_TARGET_HOURS)
-    for outcome in outcomes:
-        delta = None
-        use_clob_history = outcome.event_slug in watchlist_slugs
-        if use_clob_history and outcome.token_id and outcome.probability is not None:
-            try:
-                history = client.get_price_history(outcome.token_id, start, end)
-                reference = _reference_probability(history_points(history), target)
-                if reference is not None:
-                    delta = (outcome.probability - reference) * 100
-            except Exception:
-                delta = None
-        if delta is None:
-            delta = calculate_snapshot_delta_pp(storage, outcome, observed_at)
-        deltas[outcome_key(outcome)] = delta
-    return deltas
+    enriched = dict(deltas)
+    for item in _clob_delta_targets(provisional, watchlist_slugs, budget):
+        outcome = item.outcome
+        try:
+            history = client.get_price_history(outcome.token_id or "", start, end)
+        except Exception:
+            continue
+        reference = _reference_probability(history_points(history), target)
+        if reference is not None and outcome.probability is not None:
+            enriched[outcome_key(outcome)] = (outcome.probability - reference) * 100
+    return enriched
+
+
+def _clob_delta_targets(provisional: list, watchlist_slugs: set[str], budget: int) -> list:
+    """Pick which outcomes are worth a price-history request.
+
+    `provisional` arrives sorted by score, so keeping first-seen order preserves
+    that ranking. Only the best outcome of each market is fetched, and only a few
+    markets per event, because the briefing never shows more than that anyway.
+    """
+    best_per_market: dict[tuple[str, str | None], object] = {}
+    for item in provisional:
+        outcome = item.outcome
+        if not outcome.token_id or outcome.probability is None:
+            continue
+        best_per_market.setdefault((outcome.event_slug, outcome.market_id), item)
+
+    per_event: dict[str, list] = {}
+    for item in best_per_market.values():
+        markets = per_event.setdefault(item.outcome.event_slug, [])
+        if len(markets) < CLOB_DELTA_MARKETS_PER_EVENT:
+            markets.append(item)
+
+    watchlist_first = [
+        item for slug, items in per_event.items() if slug in watchlist_slugs for item in items
+    ]
+    remainder = [
+        item for slug, items in per_event.items() if slug not in watchlist_slugs for item in items
+    ]
+    return [*watchlist_first, *remainder][:budget]
 
 
 def _reference_probability(
@@ -306,8 +404,11 @@ def _select_items(
 ):
     grouped: dict[str, list] = {}
     for item in scored:
-        recently_sent = "최근 발송" in item.reasons or "최근 이벤트" in item.reasons
-        sharply_changed = "24h 급변" in item.reasons
+        recently_sent = (
+            ReasonCode.RECENTLY_SENT in item.reasons
+            or ReasonCode.EVENT_RECENTLY_SENT in item.reasons
+        )
+        sharply_changed = ReasonCode.SHARP_CHANGE in item.reasons
         if item.score < min_score and (
             item.outcome.event_slug not in watchlist_slugs
             or (recently_sent and not sharply_changed)
@@ -341,6 +442,67 @@ def _top_event_items(items: list, max_markets: int = 3) -> list:
     for group in ordered_markets[:max_markets]:
         selected.extend(sorted(group, key=lambda item: item.outcome.outcome.lower() != "yes")[:2])
     return selected
+
+
+_TOPIC_NOISE = re.compile(
+    r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?"
+    r"|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b"
+    r"|\b\d+(?:st|nd|rd|th)?\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _topic_signature(title: str) -> str:
+    """Collapse a title to the part that identifies its topic.
+
+    "Largest Company end of July?" and "Largest Company end of August?" are the
+    same recurring question with a different settlement date, and shipping both
+    spends two of seven slots on one topic. Dates and numbers are what vary, so
+    strip them and compare what is left. Deliberately an exact match on the
+    remainder rather than a fuzzy score — wrongly merging two distinct markets
+    hides information, which is worse than showing a near-duplicate.
+    """
+    cleaned = _TOPIC_NOISE.sub(" ", title.lower())
+    return " ".join(re.findall(r"[a-z가-힣]+", cleaned))
+
+
+def _collapse_similar_events(selected: list, max_events_per_topic: int) -> list:
+    if max_events_per_topic <= 0:
+        return selected
+    kept_per_topic: dict[str, set[str]] = {}
+    result = []
+    for item in selected:
+        signature = _topic_signature(item.outcome.event_title)
+        slugs = kept_per_topic.setdefault(signature, set())
+        if item.outcome.event_slug in slugs:
+            result.append(item)
+            continue
+        if len(slugs) >= max_events_per_topic:
+            continue
+        slugs.add(item.outcome.event_slug)
+        result.append(item)
+    return result
+
+
+def _hide_no_hope_outcomes(selected: list, min_probability: float) -> list:
+    """Drop candidates too unlikely to be worth a line.
+
+    A 0.1% outcome carries no information for a morning briefing. The first item
+    of each event always survives, so filtering can never leave an event with a
+    heading and no facts under it.
+    """
+    if min_probability <= 0:
+        return selected
+    seen_events: set[str] = set()
+    result = []
+    for item in selected:
+        slug = item.outcome.event_slug
+        is_first_of_event = slug not in seen_events
+        seen_events.add(slug)
+        probability = item.outcome.probability
+        if is_first_of_event or probability is None or probability >= min_probability:
+            result.append(item)
+    return result
 
 
 def _limit_by_event_count(selected: list, max_events: int) -> list:

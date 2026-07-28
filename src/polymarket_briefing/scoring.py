@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from polymarket_briefing.config import DEFAULT_SCORE_WEIGHTS, AppConfig
 from polymarket_briefing.models import (
     NormalizedOutcome,
+    ReasonCode,
     ScoredOutcome,
     outcome_haystack,
     outcome_key,
@@ -135,20 +136,20 @@ def reasons_for(
     config: AppConfig,
     already_sent: bool = False,
     event_recently_sent: bool = False,
-) -> list[str]:
-    reasons: list[str] = []
+) -> list[ReasonCode]:
+    reasons: list[ReasonCode] = []
     if already_sent:
-        reasons.append("최근 발송")
+        reasons.append(ReasonCode.RECENTLY_SENT)
     elif event_recently_sent:
-        reasons.append("최근 이벤트")
+        reasons.append(ReasonCode.EVENT_RECENTLY_SENT)
     if outcome.event_slug in config.watchlist_slugs:
-        reasons.append("watchlist")
+        reasons.append(ReasonCode.WATCHLIST)
     if delta_24h_pp is not None and abs(delta_24h_pp) >= config.scoring.probability_change_alert_pp:
-        reasons.append("24h 급변")
+        reasons.append(ReasonCode.SHARP_CHANGE)
     if signals["relevance_signal"] >= 0.8:
-        reasons.append("관심 키워드")
+        reasons.append(ReasonCode.KEYWORD)
     if signals["volume_signal"] >= 0.8:
-        reasons.append("거래량 큼")
+        reasons.append(ReasonCode.HIGH_VOLUME)
     if signals["deadline_signal"] >= 0.6:
-        reasons.append("정산 임박")
-    return reasons or ["관심도 점수"]
+        reasons.append(ReasonCode.DEADLINE)
+    return reasons or [ReasonCode.BASELINE]

@@ -1,5 +1,4 @@
 timezone: Asia/Seoul
-run_time_local: "08:07"
 
 polymarket:
   gamma_base_url: "https://gamma-api.polymarket.com"
@@ -7,6 +6,9 @@ polymarket:
   request_timeout_seconds: 20
   max_retries: 3
   backoff_seconds: 1.5
+  # Gamma API는 /events 한 번에 최대 100개까지만 돌려줍니다.
+  # discovery.max_events에 도달할 때까지 이 크기로 페이지를 넘겨가며 수집합니다.
+  page_size: 100
 
 # Prediction markets resolve and disappear, so these need periodic review.
 # A slug whose markets have all closed is reported in the briefing as
@@ -55,6 +57,11 @@ scoring:
   sent_penalty_days: 7
   sent_penalty_factor: 0.25
   sent_event_penalty_factor: 0.60
+  # 이 확률 미만인 결과(예: 0.1% 후보)는 가망이 없으므로 브리핑 본문에서 숨깁니다.
+  min_probability_to_show: 0.03
+  # 같은 주제의 중복 이벤트(예: "Largest Company end of July" vs "... end of August")를
+  # 주제당 이 개수까지만 남기고 접습니다.
+  max_events_per_topic: 1
   score_weights:
     change_signal: 0.40
     relevance_signal: 0.25
@@ -64,7 +71,10 @@ scoring:
     liquidity_signal: 0.03
 
 ai_summary:
-  enabled: false
+  # 규칙 기반 번역은 사전에 없는 표현을 영어로 남겨 "NVIDIA가 the 세계 최대 기업"
+  # 같은 혼합 문장을 만듭니다. LLM 경로를 기본으로 두고, 키가 없거나 호출이
+  # 실패하면 규칙 기반 요약으로 자동 폴백합니다(발송 자체는 절대 막지 않음).
+  enabled: true
   model: "qwen/qwen3.6-flash"
   max_retries: 3
   timeout_seconds: 45
@@ -78,10 +88,8 @@ notification:
     title: "Polymarket 아침 브리핑"
     priority: 3
   telegram:
-    enabled: false
     bot_token_env: TELEGRAM_BOT_TOKEN
     chat_id_env: TELEGRAM_CHAT_ID
 
 storage:
   path: "state/briefing_state.sqlite"
-  snapshot_dir: "state/snapshots"

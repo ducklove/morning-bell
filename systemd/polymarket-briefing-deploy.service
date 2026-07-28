@@ -1,0 +1,9 @@
+[Unit]
+Description=Poll GitHub and deploy morning-bell on new commits
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/cantabile/Works/morning-bell
+ExecStart=/home/cantabile/Works/morning-bell/systemd/deploy.sh

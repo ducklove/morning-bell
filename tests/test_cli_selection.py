@@ -1,14 +1,18 @@
 from datetime import UTC, datetime, timedelta
 
 from polymarket_briefing.cli import (
+    _briefing_dedupe_key,
+    _collapse_similar_events,
     _filter_closed,
     _filter_discovery,
+    _hide_no_hope_outcomes,
     _limit_by_event_count,
     _reference_probability,
     _select_items,
+    _topic_signature,
     _with_stale_watchlist_notice,
 )
-from polymarket_briefing.models import NormalizedOutcome, ScoredOutcome
+from polymarket_briefing.models import NormalizedOutcome, ReasonCode, ScoredOutcome
 
 
 def outcome(event_slug="watch", **kwargs):
@@ -38,19 +42,21 @@ def outcome(event_slug="watch", **kwargs):
 
 
 def test_recently_sent_watchlist_item_below_threshold_is_not_reselected():
-    scored = [ScoredOutcome(outcome(), 20, 1.0, ("최근 발송", "watchlist"))]
+    scored = [ScoredOutcome(outcome(), 20, 1.0, (ReasonCode.RECENTLY_SENT, ReasonCode.WATCHLIST))]
 
     assert _select_items(scored, {"watch"}, min_score=35) == []
 
 
 def test_recently_sent_watchlist_item_with_sharp_change_can_be_reselected():
-    item = ScoredOutcome(outcome(), 20, 5.0, ("최근 발송", "watchlist", "24h 급변"))
+    reasons = (ReasonCode.RECENTLY_SENT, ReasonCode.WATCHLIST, ReasonCode.SHARP_CHANGE)
+    item = ScoredOutcome(outcome(), 20, 5.0, reasons)
 
     assert _select_items([item], {"watch"}, min_score=35) == [item]
 
 
 def test_recently_sent_event_below_threshold_is_not_reselected():
-    scored = [ScoredOutcome(outcome(), 30, 1.0, ("최근 이벤트", "watchlist"))]
+    reasons = (ReasonCode.EVENT_RECENTLY_SENT, ReasonCode.WATCHLIST)
+    scored = [ScoredOutcome(outcome(), 30, 1.0, reasons)]
 
     assert _select_items(scored, {"watch"}, min_score=35) == []
 
@@ -123,3 +129,67 @@ def test_stale_watchlist_notice_is_absent_when_watchlist_is_healthy():
     message = "1) 항목\n꼬리표: 정보 요약이며 투자 조언이 아닙니다."
 
     assert _with_stale_watchlist_notice(message, []) == message
+
+
+def test_topic_signature_ignores_settlement_date():
+    july = _topic_signature("Largest Company end of July?")
+    august = _topic_signature("Largest Company end of August?")
+    december = _topic_signature("Largest Company end of December 2026?")
+
+    assert july == august == december
+
+
+def test_topic_signature_keeps_genuinely_different_questions_apart():
+    assert _topic_signature("Largest Company end of July?") != _topic_signature(
+        "Next round of US-Iran peace talks by July 31?"
+    )
+
+
+def test_collapse_similar_events_keeps_only_the_first_event_per_topic():
+    july = ScoredOutcome(outcome("largest-july", event_title="Largest Company end of July?"), 90)
+    august = ScoredOutcome(
+        outcome("largest-august", event_title="Largest Company end of August?"), 80
+    )
+    other = ScoredOutcome(outcome("hormuz", event_title="Strait of Hormuz normal?"), 70)
+
+    collapsed = _collapse_similar_events([july, august, other], max_events_per_topic=1)
+
+    assert collapsed == [july, other]
+
+
+def test_collapse_similar_events_keeps_every_outcome_of_a_kept_event():
+    yes = ScoredOutcome(outcome("a", event_title="Largest Company end of July?"), 90)
+    no = ScoredOutcome(
+        outcome("a", outcome="No", event_title="Largest Company end of July?"), 89
+    )
+
+    assert _collapse_similar_events([yes, no], max_events_per_topic=1) == [yes, no]
+
+
+def test_hide_no_hope_outcomes_drops_hopeless_candidates():
+    lead = ScoredOutcome(outcome("e", market_id="m1", probability=0.62), 90)
+    hopeless = ScoredOutcome(outcome("e", market_id="m2", probability=0.001), 40)
+
+    assert _hide_no_hope_outcomes([lead, hopeless], 0.03) == [lead]
+
+
+def test_hide_no_hope_outcomes_never_empties_an_event():
+    only = ScoredOutcome(outcome("e", probability=0.001), 40)
+
+    assert _hide_no_hope_outcomes([only], 0.03) == [only]
+
+
+def test_briefing_dedupe_key_reacts_to_a_change_below_the_top_item():
+    now = datetime(2026, 7, 28, tzinfo=UTC)
+    top = ScoredOutcome(outcome("a", probability=0.5), 90)
+    second = ScoredOutcome(outcome("b", probability=0.4), 80)
+    moved = ScoredOutcome(outcome("b", probability=0.9), 80)
+
+    assert _briefing_dedupe_key(now, [top, second]) != _briefing_dedupe_key(now, [top, moved])
+    assert _briefing_dedupe_key(now, [top, second]) == _briefing_dedupe_key(now, [top, second])
+
+
+def test_briefing_dedupe_key_is_stable_for_an_empty_briefing():
+    now = datetime(2026, 7, 28, tzinfo=UTC)
+
+    assert _briefing_dedupe_key(now, []) == _briefing_dedupe_key(now, [])

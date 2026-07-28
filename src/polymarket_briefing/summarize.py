@@ -6,7 +6,7 @@ from datetime import datetime
 from re import Match
 from zoneinfo import ZoneInfo
 
-from polymarket_briefing.models import ScoredOutcome
+from polymarket_briefing.models import ReasonCode, ScoredOutcome
 from polymarket_briefing.utils import pct, pp
 
 
@@ -47,9 +47,21 @@ def summarize(items: list[ScoredOutcome], max_items: int, timezone_name: str = "
 
 
 def _display_items(group: list[ScoredOutcome]) -> list[ScoredOutcome]:
+    """Order the lines shown under one event heading.
+
+    Across the markets of one event ("who will be largest company?") the reader
+    wants the front-runner first. Internal score ranks by newsworthiness — it
+    rewards a move toward 50% — so sorting by it put a 20% candidate above a
+    79% one. Score decides which events make the briefing; probability decides
+    the order within one.
+    """
     if _has_multiple_markets(group):
         yes_items = [item for item in group if item.outcome.outcome.lower() == "yes"]
-        return sorted(yes_items or group, key=lambda item: item.score, reverse=True)
+        return sorted(
+            yes_items or group,
+            key=lambda item: (item.outcome.probability or 0, item.score),
+            reverse=True,
+        )
     return _display_order(group)
 
 
@@ -240,12 +252,20 @@ def _outcome_label(outcome: str) -> str:
     return labels.get(outcome.lower(), _translate_market_phrase(outcome))
 
 
-def _reason_label(reason: str) -> str:
-    labels = {
-        "watchlist": "관심 목록",
-        "24h 급변": "24시간 급변",
-    }
-    return labels.get(reason, reason)
+_REASON_LABELS = {
+    ReasonCode.RECENTLY_SENT: "최근 발송",
+    ReasonCode.EVENT_RECENTLY_SENT: "최근 이벤트",
+    ReasonCode.WATCHLIST: "관심 목록",
+    ReasonCode.SHARP_CHANGE: "24시간 급변",
+    ReasonCode.KEYWORD: "관심 키워드",
+    ReasonCode.HIGH_VOLUME: "거래량 큼",
+    ReasonCode.DEADLINE: "정산 임박",
+    ReasonCode.BASELINE: "관심도 점수",
+}
+
+
+def _reason_label(reason: ReasonCode | str) -> str:
+    return _REASON_LABELS.get(reason, str(reason))
 
 
 _HANGUL_SYLLABLE_START = 0xAC00
@@ -269,7 +289,19 @@ def _ro_particle(word: str) -> str:
 
 
 def _trend_explanation(group: list[ScoredOutcome]) -> str | None:
-    yes_item = next((item for item in group if item.outcome.outcome.lower() == "yes"), None)
+    """Describe the market that earned the event its place.
+
+    Lines are ordered by probability, but the sentence has to describe whichever
+    market actually moved — otherwise an event selected for "24시간 급변" gets a
+    "거의 변하지 않았습니다" explanation sitting right above that reason.
+    """
+    yes_items = [item for item in group if item.outcome.outcome.lower() == "yes"]
+    candidates = yes_items or list(group)
+    yes_item = max(
+        candidates,
+        key=lambda item: abs(item.delta_24h_pp) if item.delta_24h_pp is not None else -1.0,
+        default=None,
+    )
     if yes_item is None or yes_item.outcome.probability is None:
         return None
     probability = yes_item.outcome.probability

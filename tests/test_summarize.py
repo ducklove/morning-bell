@@ -1,4 +1,4 @@
-from polymarket_briefing.models import NormalizedOutcome, ScoredOutcome
+from polymarket_briefing.models import NormalizedOutcome, ReasonCode, ScoredOutcome
 from polymarket_briefing.summarize import summarize
 
 
@@ -162,3 +162,27 @@ def test_summary_translates_sports_versus_title():
     )
     text = summarize([ScoredOutcome(outcome, 80, -28.0, ("거래량 큼",))], max_items=7)
     assert "76ers 대 Celtics" in text
+
+
+def test_explanation_describes_the_market_that_actually_moved():
+    """The 해설 sentence must not contradict the 왜 봄 reason.
+
+    Lines are ordered by probability, so the first line can be a market that
+    barely moved while the event was selected because a different one jumped.
+    """
+    steady = NormalizedOutcome(
+        **{**sample_outcome().__dict__, "market_id": "m1", "probability": 0.125}
+    )
+    mover = NormalizedOutcome(
+        **{**sample_outcome().__dict__, "market_id": "m2", "probability": 0.041}
+    )
+    text = summarize(
+        [
+            ScoredOutcome(steady, 80, 0.0, (ReasonCode.SHARP_CHANGE,)),
+            ScoredOutcome(mover, 79, -4.9, (ReasonCode.SHARP_CHANGE,)),
+        ],
+        max_items=7,
+    )
+
+    assert "4.9pp 내렸습니다" in text
+    assert "거의 변하지 않았습니다" not in text

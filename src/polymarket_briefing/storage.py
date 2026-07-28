@@ -55,6 +55,10 @@ class BriefingStorage:
             );
             CREATE INDEX IF NOT EXISTS idx_sent_outcomes_recent
               ON sent_outcomes (sent_at, event_slug, market_id, outcome);
+            CREATE INDEX IF NOT EXISTS idx_outcome_snapshots_lookup
+              ON outcome_snapshots (
+                event_slug, COALESCE(market_id, ''), market_question, outcome, observed_at
+              );
             """
         )
         self.connection.commit()
@@ -91,24 +95,28 @@ class BriefingStorage:
         target = observed_at - timedelta(hours=hours_back)
         lower = target - timedelta(hours=6)
         upper = target + timedelta(hours=6)
+        # The market_id predicate is kept in the `COALESCE(market_id, '') = ?` shape so it
+        # matches the indexed expression in idx_outcome_snapshots_lookup; the parameter is
+        # normalized in Python instead of by a second COALESCE. Semantics are unchanged:
+        # a NULL market_id matches only a NULL/empty parameter, never a non-NULL value.
         rows = self.connection.execute(
             """
             SELECT * FROM outcome_snapshots
-            WHERE observed_at BETWEEN ? AND ?
-              AND event_slug = ?
-              AND COALESCE(market_id, '') = COALESCE(?, '')
+            WHERE event_slug = ?
+              AND COALESCE(market_id, '') = ?
               AND market_question = ?
               AND outcome = ?
+              AND observed_at BETWEEN ? AND ?
             ORDER BY ABS(strftime('%s', observed_at) - strftime('%s', ?))
             LIMIT 1
             """,
             (
-                lower.isoformat(),
-                upper.isoformat(),
                 outcome.event_slug,
-                outcome.market_id,
+                outcome.market_id or "",
                 outcome.market_question,
                 outcome.outcome,
+                lower.isoformat(),
+                upper.isoformat(),
                 target.isoformat(),
             ),
         ).fetchone()

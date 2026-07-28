@@ -42,6 +42,48 @@ def test_snapshot_insert_and_lookup(tmp_path):
         assert calculate_snapshot_delta_pp(storage, sample_outcome(0.5), now) == pytest.approx(10.0)
 
 
+def test_snapshot_lookup_matches_market_id_including_null(tmp_path):
+    now = datetime.now(UTC)
+    yesterday = now - timedelta(hours=24)
+    with BriefingStorage(str(tmp_path / "state.sqlite")) as storage:
+        storage.insert_snapshots(
+            [
+                sample_outcome(0.10, market_id="m1"),
+                sample_outcome(0.20, market_id="m2"),
+                sample_outcome(0.30, market_id=None),
+            ],
+            yesterday,
+        )
+
+        non_null = storage.find_snapshot_around(sample_outcome(0.5, market_id="m1"), now)
+        assert non_null is not None
+        assert non_null.market_id == "m1"
+        assert non_null.probability == 0.10
+
+        null_id = storage.find_snapshot_around(sample_outcome(0.5, market_id=None), now)
+        assert null_id is not None
+        assert null_id.market_id is None
+        assert null_id.probability == 0.30
+
+        # a market_id with no stored row must not fall back to the NULL row
+        assert storage.find_snapshot_around(sample_outcome(0.5, market_id="missing"), now) is None
+
+
+def test_snapshot_lookup_uses_index(tmp_path):
+    now = datetime.now(UTC)
+    with BriefingStorage(str(tmp_path / "state.sqlite")) as storage:
+        storage.insert_snapshots([sample_outcome(0.4)], now - timedelta(hours=24))
+        captured = []
+        storage.connection.set_trace_callback(captured.append)
+        storage.find_snapshot_around(sample_outcome(0.5), now)
+        storage.connection.set_trace_callback(None)
+        sql = next(item for item in captured if "outcome_snapshots" in item)
+        plan = [
+            row[-1] for row in storage.connection.execute("EXPLAIN QUERY PLAN " + sql).fetchall()
+        ]
+        assert any("idx_outcome_snapshots_lookup" in step for step in plan), plan
+
+
 def test_notification_dedupe(tmp_path):
     now = datetime.now(UTC)
     with BriefingStorage(str(tmp_path / "state.sqlite")) as storage:

@@ -2,6 +2,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
+
+
+class ReasonCode(StrEnum):
+    """Why an outcome was surfaced.
+
+    Selection logic branches on these, so they are stable identifiers rather
+    than the Korean strings shown to the reader — editing a display label used
+    to silently change which items got selected.
+    """
+
+    RECENTLY_SENT = "recently_sent"
+    EVENT_RECENTLY_SENT = "event_recently_sent"
+    WATCHLIST = "watchlist"
+    SHARP_CHANGE = "sharp_change"
+    KEYWORD = "keyword"
+    HIGH_VOLUME = "high_volume"
+    DEADLINE = "deadline"
+    BASELINE = "baseline"
 
 
 @dataclass(frozen=True)
@@ -33,7 +52,7 @@ class ScoredOutcome:
     outcome: NormalizedOutcome
     score: float
     delta_24h_pp: float | None = None
-    reasons: tuple[str, ...] = field(default_factory=tuple)
+    reasons: tuple[ReasonCode, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)

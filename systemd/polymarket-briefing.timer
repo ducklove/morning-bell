@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Polymarket morning briefing every day at 08:07 KST
+
+[Timer]
+OnCalendar=*-*-* 08:07:00
+Persistent=true
+Unit=polymarket-briefing.service
+
+[Install]
+WantedBy=timers.target

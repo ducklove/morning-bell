@@ -1,0 +1,10 @@
+[Unit]
+Description=Check for morning-bell updates every 2 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+Unit=polymarket-briefing-deploy.service
+
+[Install]
+WantedBy=timers.target
