@@ -56,6 +56,21 @@ class ScoredOutcome:
 
 
 @dataclass(frozen=True)
+class FetchResult:
+    outcomes: list[NormalizedOutcome]
+    closed_slugs: list[str]
+    failed_sources: list[str]
+    successful_sources: int
+
+
+def activity_volume(outcome: NormalizedOutcome) -> float:
+    """A reported zero is meaningful; only missing 24h data uses total volume."""
+    if outcome.volume_24h is not None:
+        return outcome.volume_24h
+    return outcome.volume if outcome.volume is not None else 0.0
+
+
+@dataclass(frozen=True)
 class Snapshot:
     observed_at: datetime
     event_slug: str

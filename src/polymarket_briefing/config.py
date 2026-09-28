@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, TypeVar
+from zoneinfo import ZoneInfo
 
 import yaml
+
+from polymarket_briefing.storage import DEFAULT_STORAGE_PATH
 
 
 @dataclass(frozen=True)
@@ -76,7 +80,7 @@ class NotificationSettings:
 
 @dataclass(frozen=True)
 class StorageSettings:
-    path: str = "state/briefing_state.sqlite"
+    path: str = DEFAULT_STORAGE_PATH
     retention_days: int = 30
 
 
@@ -98,10 +102,14 @@ SettingsT = TypeVar("SettingsT")
 def load_config(path: str | Path) -> AppConfig:
     with Path(path).open(encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
+    if not isinstance(raw, dict):
+        raise ValueError("Config must be a YAML mapping")
     _reject_unknown_keys(raw, _valid_keys(AppConfig), "top-level config")
+    if not isinstance(raw.get("watchlist_slugs", []), list):
+        raise ValueError("watchlist_slugs must be a list")
     scoring_raw = dict(raw.get("scoring") or {})
     _validate_score_weights(scoring_raw.get("score_weights") or {})
-    return AppConfig(
+    config = AppConfig(
         timezone=raw.get("timezone", "Asia/Seoul"),
         polymarket=_build(PolymarketSettings, raw.get("polymarket"), "polymarket"),
         watchlist_slugs=list(raw.get("watchlist_slugs") or []),
@@ -111,6 +119,42 @@ def load_config(path: str | Path) -> AppConfig:
         notification=_build(NotificationSettings, raw.get("notification"), "notification"),
         storage=_build(StorageSettings, raw.get("storage"), "storage"),
     )
+    _validate_values(config)
+    return config
+
+
+def _validate_values(config: AppConfig) -> None:
+    ZoneInfo(config.timezone)
+    if config.notification.provider.lower() not in {"ntfy", "telegram"}:
+        raise ValueError("notification.provider must be ntfy or telegram")
+    if not all(isinstance(slug, str) and slug for slug in config.watchlist_slugs):
+        raise ValueError("watchlist_slugs must contain non-empty strings")
+    for name, value, lower, upper in [
+        ("polymarket.page_size", config.polymarket.page_size, 1, 100),
+        ("polymarket.max_retries", config.polymarket.max_retries, 0, 10),
+        ("discovery.max_events", config.discovery.max_events, 0, 100000),
+        ("scoring.max_items", config.scoring.max_items, 1, 100),
+        ("storage.retention_days", config.storage.retention_days, 1, 36500),
+    ]:
+        if type(value) is not int or not lower <= value <= upper:
+            raise ValueError(f"{name} must be an integer between {lower} and {upper}")
+    for section_name, section in [
+        ("polymarket", config.polymarket), ("ai_summary", config.ai_summary),
+        ("scoring", config.scoring), ("discovery", config.discovery),
+    ]:
+        for field_info in fields(section):
+            value = getattr(section, field_info.name)
+            if field_info.type in {"int", "float"} and (
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0
+                or (field_info.type == "int" and type(value) is not int)
+            ):
+                raise ValueError(f"{section_name}.{field_info.name} must be finite and >= 0")
+            if field_info.type == "bool" and not isinstance(value, bool):
+                raise ValueError(f"{section_name}.{field_info.name} must be true or false")
+    for key, value in config.scoring.score_weights.items():
+        if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"scoring.score_weights.{key} must be finite and >= 0")
 
 
 def _valid_keys(settings_cls: type) -> list[str]:

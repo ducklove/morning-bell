@@ -13,15 +13,18 @@ import typer
 
 from polymarket_briefing.ai_summary import load_openrouter_key, summarize_with_openrouter
 from polymarket_briefing.charts import build_price_charts, history_points
-from polymarket_briefing.config import load_config
+from polymarket_briefing.config import AppConfig, load_config
 from polymarket_briefing.models import (
+    FetchResult,
     NormalizedOutcome,
     ReasonCode,
+    ScoredOutcome,
+    activity_volume,
     outcome_haystack,
     outcome_key,
 )
 from polymarket_briefing.normalize import normalize_event, normalize_events
-from polymarket_briefing.notifier import notify
+from polymarket_briefing.notifier import notify, prepare_briefing
 from polymarket_briefing.polymarket_client import PolymarketClient
 from polymarket_briefing.scoring import contains_term, score_outcomes
 from polymarket_briefing.storage import (
@@ -29,7 +32,7 @@ from polymarket_briefing.storage import (
     calculate_snapshot_delta_pp,
     dedupe_key_for,
 )
-from polymarket_briefing.summarize import summarize
+from polymarket_briefing.summarize import displayed_items, summarize
 from polymarket_briefing.utils import utc_now
 
 
@@ -69,8 +72,19 @@ def run(
 ) -> None:
     cfg = load_config(config)
     observed_at = utc_now()
-    with PolymarketClient(cfg.polymarket) as client, BriefingStorage(cfg.storage.path) as storage:
-        outcomes, stale_slugs = _fetch_all(client, cfg)
+    effective_dry_run = dry_run or cfg.notification.dry_run_default
+    with (
+        PolymarketClient(cfg.polymarket) as client,
+        BriefingStorage(cfg.storage.path, read_only=effective_dry_run) as storage,
+    ):
+        fetched = _fetch_all(client, cfg)
+        if fetched.failed_sources and not fetched.successful_sources:
+            typer.echo(
+                "오류: 모든 데이터 소스 조회에 실패했습니다. 브리핑을 발송하지 않습니다.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        outcomes = fetched.outcomes
         watchlist_slugs = set(cfg.watchlist_slugs)
         sent_outcome_keys = storage.recently_sent_outcome_keys(
             observed_at, cfg.scoring.sent_penalty_days
@@ -89,10 +103,10 @@ def run(
             outcomes, deltas, cfg, observed_at, sent_outcome_keys, sent_event_slugs
         )
         selected = _select_items(scored, watchlist_slugs, cfg.scoring.min_score_to_notify)
-        selected = _limit_by_event_count(selected, cfg.scoring.max_items)
         selected = _collapse_similar_events(selected, cfg.scoring.max_events_per_topic)
+        selected = _limit_by_event_count(selected, cfg.scoring.max_items)
         selected = _hide_no_hope_outcomes(selected, cfg.scoring.min_probability_to_show)
-        message = summarize(selected, cfg.scoring.max_items, cfg.timezone)
+        message = summarize(selected, cfg.scoring.max_items, cfg.timezone, observed_at=observed_at)
         use_ai_summary = cfg.ai_summary.enabled if ai_summary is None else ai_summary
         api_key = load_openrouter_key() if use_ai_summary else None
         if use_ai_summary and not api_key:
@@ -110,8 +124,19 @@ def run(
                 backoff_seconds=cfg.ai_summary.backoff_seconds,
             )
         # After the AI pass so the notice cannot be paraphrased away.
-        message = _with_stale_watchlist_notice(message, stale_slugs)
-        effective_dry_run = dry_run or cfg.notification.dry_run_default
+        message = _with_stale_watchlist_notice(message, fetched.closed_slugs)
+        if fetched.failed_sources:
+            message = _with_notice(
+                message,
+                f"[점검] 데이터 소스 {len(fetched.failed_sources)}개 조회 실패 · 일부 결과만 표시",
+            )
+        message, selected = prepare_briefing(message, displayed_items(selected))
+        typer.echo(
+            f"진단: 조회 성공 {fetched.successful_sources} / 실패 {len(fetched.failed_sources)} · "
+            f"결과 {len(outcomes)}개 · 표시 {len({i.outcome.event_slug for i in selected})}건 · "
+            f"변화량 {sum(i.delta_24h_pp is not None for i in selected)}/{len(selected)}개",
+            err=True,
+        )
         attachments = []
         if cfg.notification.provider.lower() == "telegram":
             attachments = build_price_charts(client, selected, observed_at)
@@ -130,13 +155,13 @@ def run(
 
 
 def _deliver(
-    cfg,
+    cfg: AppConfig,
     storage: BriefingStorage,
     message: str,
-    selected: list,
+    selected: list[ScoredOutcome],
     observed_at: datetime,
     effective_dry_run: bool,
-    attachments: list,
+    attachments: list[Path],
 ) -> None:
     key = _briefing_dedupe_key(observed_at, selected)
     if not effective_dry_run and storage.notification_sent(key):
@@ -144,11 +169,12 @@ def _deliver(
     notify(cfg.notification, message, dry_run=effective_dry_run, attachments=attachments)
     if effective_dry_run:
         return
-    storage.record_notification(key, "Polymarket 아침 브리핑", observed_at)
-    storage.record_sent_outcomes([item.outcome for item in selected], observed_at)
+    storage.record_delivery(
+        key, "Polymarket 아침 브리핑", [item.outcome for item in selected], observed_at
+    )
 
 
-def _briefing_dedupe_key(observed_at: datetime, selected: list) -> str:
+def _briefing_dedupe_key(observed_at: datetime, selected: list[ScoredOutcome]) -> str:
     """Derive one key from the whole briefing, not just its top item.
 
     Keying on `selected[0]` alone meant a day where only the lower items changed
@@ -193,16 +219,37 @@ def fetch_watchlist(
         )
 
 
+@app.command("validate-config")
+def validate_config(
+    config: Annotated[Path, typer.Option("--config")] = Path("config.yaml"),
+) -> None:
+    load_config(config)
+    typer.echo("설정 검증 완료")
+
+
+@app.command("backup-state")
+def backup_state(
+    output: Annotated[Path, typer.Option("--output")],
+    config: Annotated[Path, typer.Option("--config")] = Path("config.yaml"),
+) -> None:
+    cfg = load_config(config)
+    with BriefingStorage(cfg.storage.path) as storage:
+        storage.backup_to(output.expanduser())
+        typer.echo(f"상태 DB: {storage.path}; 백업: {output}")
+
+
 @app.command()
 def discover(config: Annotated[Path, typer.Option("--config", "-c")] = Path("config.yaml")) -> None:
     cfg = load_config(config)
     observed_at = utc_now()
     with PolymarketClient(cfg.polymarket) as client:
-        events = client.list_active_events(limit=cfg.discovery.max_events)
+        events = _discover_events(client, cfg)
         outcomes = _filter_discovery(
             normalize_events(events),
             cfg.discovery.min_volume_24h,
             cfg.discovery.exclude_terms,
+            include_closed=cfg.discovery.include_closed,
+            active_only=cfg.discovery.include_active_only,
         )
         scored = score_outcomes(outcomes, {}, cfg, observed_at)[: cfg.scoring.max_items]
         for item in scored:
@@ -218,7 +265,7 @@ def test_notify(
     notify(cfg.notification, "테스트 알림입니다", dry_run=dry_run)
 
 
-def _fetch_all(client: PolymarketClient, cfg) -> tuple[list[NormalizedOutcome], list[str]]:
+def _fetch_all(client: PolymarketClient, cfg: AppConfig) -> FetchResult:
     """Fetch watchlist + discovery outcomes, and report unusable watchlist slugs.
 
     A watchlist event that has fully resolved still returns HTTP 200, so it is
@@ -228,30 +275,52 @@ def _fetch_all(client: PolymarketClient, cfg) -> tuple[list[NormalizedOutcome], 
     """
     outcomes: list[NormalizedOutcome] = []
     stale_slugs: list[str] = []
+    failed_sources: list[str] = []
+    successful_sources = 0
     for slug in cfg.watchlist_slugs:
         try:
-            live = _filter_closed(normalize_event(client.get_event_by_slug(slug)))
+            normalized = normalize_event(client.get_event_by_slug(slug))
+            if not normalized:
+                raise RuntimeError("시장 데이터가 없거나 응답 형식이 변경되었습니다")
+            live = _filter_closed(normalized)
         except RuntimeError as exc:
             typer.echo(f"skip watchlist {slug}: {exc}", err=True)
-            stale_slugs.append(slug)
+            failed_sources.append(slug)
             continue
+        successful_sources += 1
         if not live:
             typer.echo(f"warning: watchlist {slug} has no open markets", err=True)
             stale_slugs.append(slug)
         outcomes.extend(live)
     if cfg.discovery.enabled:
         try:
-            events = client.list_active_events(limit=cfg.discovery.max_events)
+            events = _discover_events(client, cfg)
+            normalized = normalize_events(events)
+            if events and not normalized:
+                raise RuntimeError("이벤트를 정규화할 수 없습니다")
             outcomes.extend(
                 _filter_discovery(
-                    normalize_events(events),
+                    normalized,
                     cfg.discovery.min_volume_24h,
                     cfg.discovery.exclude_terms,
+                    include_closed=cfg.discovery.include_closed,
+                    active_only=cfg.discovery.include_active_only,
                 )
             )
+            successful_sources += 1
         except RuntimeError as exc:
             typer.echo(f"skip discovery: {exc}", err=True)
-    return _dedupe_outcomes(outcomes), stale_slugs
+            failed_sources.append("discovery")
+    return FetchResult(_dedupe_outcomes(outcomes), stale_slugs, failed_sources, successful_sources)
+
+
+def _discover_events(client: PolymarketClient, cfg: AppConfig) -> list[dict]:
+    return client.list_active_events(
+        limit=cfg.discovery.max_events,
+        page_size=cfg.polymarket.page_size,
+        active_only=cfg.discovery.include_active_only,
+        include_closed=cfg.discovery.include_closed,
+    )
 
 
 def _with_stale_watchlist_notice(message: str, stale_slugs: list[str]) -> str:
@@ -262,7 +331,12 @@ def _with_stale_watchlist_notice(message: str, stale_slugs: list[str]) -> str:
     """
     if not stale_slugs:
         return message
-    notice = f"[점검] 워치리스트 {len(stale_slugs)}개가 종료됨: {', '.join(stale_slugs)}"
+    # The detailed slugs are already in stderr; keep the phone notification compact.
+    notice = f"[점검] 워치리스트 {len(stale_slugs)}개가 종료됨 · 목록 갱신 필요"
+    return _with_notice(message, notice)
+
+
+def _with_notice(message: str, notice: str) -> str:
     lines = message.splitlines()
     for index, line in enumerate(lines):
         if line.startswith("꼬리표:"):
@@ -282,7 +356,7 @@ def _snapshot_deltas(
 
 def _enrich_with_clob_deltas(
     client: PolymarketClient,
-    provisional: list,
+    provisional: list[ScoredOutcome],
     deltas: dict[tuple[str, str | None, str], float | None],
     observed_at: datetime,
     watchlist_slugs: set[str],
@@ -313,21 +387,23 @@ def _enrich_with_clob_deltas(
     return enriched
 
 
-def _clob_delta_targets(provisional: list, watchlist_slugs: set[str], budget: int) -> list:
+def _clob_delta_targets(
+    provisional: list[ScoredOutcome], watchlist_slugs: set[str], budget: int
+) -> list[ScoredOutcome]:
     """Pick which outcomes are worth a price-history request.
 
     `provisional` arrives sorted by score, so keeping first-seen order preserves
     that ranking. Only the best outcome of each market is fetched, and only a few
     markets per event, because the briefing never shows more than that anyway.
     """
-    best_per_market: dict[tuple[str, str | None], object] = {}
+    best_per_market: dict[tuple[str, str | None], ScoredOutcome] = {}
     for item in provisional:
         outcome = item.outcome
         if not outcome.token_id or outcome.probability is None:
             continue
         best_per_market.setdefault((outcome.event_slug, outcome.market_id), item)
 
-    per_event: dict[str, list] = {}
+    per_event: dict[str, list[ScoredOutcome]] = {}
     for item in best_per_market.values():
         markets = per_event.setdefault(item.outcome.event_slug, [])
         if len(markets) < CLOB_DELTA_MARKETS_PER_EVENT:
@@ -370,13 +446,17 @@ def _filter_discovery(
     outcomes: list[NormalizedOutcome],
     min_volume_24h: float,
     exclude_terms: list[str] | None = None,
+    *,
+    include_closed: bool = False,
+    active_only: bool = True,
 ) -> list[NormalizedOutcome]:
     exclude_terms = exclude_terms or []
     return [
         item
         for item in outcomes
-        if (item.volume_24h or item.volume or 0) >= min_volume_24h
-        and item.closed is not True
+        if activity_volume(item) >= min_volume_24h
+        and (include_closed or item.closed is not True)
+        and (not active_only or item.active is not False)
         and not _matches_excluded_interest(item, exclude_terms)
     ]
 
@@ -398,11 +478,11 @@ def _dedupe_outcomes(outcomes: list[NormalizedOutcome]) -> list[NormalizedOutcom
 
 
 def _select_items(
-    scored,
+    scored: list[ScoredOutcome],
     watchlist_slugs: set[str],
     min_score: float,
-):
-    grouped: dict[str, list] = {}
+) -> list[ScoredOutcome]:
+    grouped: dict[str, list[ScoredOutcome]] = {}
     for item in scored:
         recently_sent = (
             ReasonCode.RECENTLY_SENT in item.reasons
@@ -429,8 +509,8 @@ def _select_items(
     return selected
 
 
-def _top_event_items(items: list, max_markets: int = 3) -> list:
-    markets: dict[str | None, list] = {}
+def _top_event_items(items: list[ScoredOutcome], max_markets: int = 3) -> list[ScoredOutcome]:
+    markets: dict[str | None, list[ScoredOutcome]] = {}
     for item in items:
         markets.setdefault(item.outcome.market_id, []).append(item)
     ordered_markets = sorted(
@@ -466,7 +546,9 @@ def _topic_signature(title: str) -> str:
     return " ".join(re.findall(r"[a-z가-힣]+", cleaned))
 
 
-def _collapse_similar_events(selected: list, max_events_per_topic: int) -> list:
+def _collapse_similar_events(
+    selected: list[ScoredOutcome], max_events_per_topic: int
+) -> list[ScoredOutcome]:
     if max_events_per_topic <= 0:
         return selected
     kept_per_topic: dict[str, set[str]] = {}
@@ -484,7 +566,9 @@ def _collapse_similar_events(selected: list, max_events_per_topic: int) -> list:
     return result
 
 
-def _hide_no_hope_outcomes(selected: list, min_probability: float) -> list:
+def _hide_no_hope_outcomes(
+    selected: list[ScoredOutcome], min_probability: float
+) -> list[ScoredOutcome]:
     """Drop candidates too unlikely to be worth a line.
 
     A 0.1% outcome carries no information for a morning briefing. The first item
@@ -505,7 +589,7 @@ def _hide_no_hope_outcomes(selected: list, min_probability: float) -> list:
     return result
 
 
-def _limit_by_event_count(selected: list, max_events: int) -> list:
+def _limit_by_event_count(selected: list[ScoredOutcome], max_events: int) -> list[ScoredOutcome]:
     """Truncate by distinct event count, not raw item count.
 
     `selected` is already ordered so a market's outcomes stay adjacent; cutting

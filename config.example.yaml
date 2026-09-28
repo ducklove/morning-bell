@@ -92,4 +92,5 @@ notification:
     chat_id_env: TELEGRAM_CHAT_ID
 
 storage:
-  path: "state/briefing_state.sqlite"
+  # Git 체크아웃 밖에 보관합니다. 기존 state/ DB는 최초 실행 시 안전하게 복사됩니다.
+  path: "~/.local/state/morning-bell/briefing_state.sqlite"

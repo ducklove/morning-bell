@@ -82,8 +82,8 @@ def test_recently_sent_outcome_is_heavily_penalized():
         watchlist_slugs=["watch"],
         scoring=ScoringSettings(sent_penalty_factor=0.2),
     )
-    original = score_outcome(outcome(), 10.0, cfg, now, 50, 10)
-    penalized = score_outcome(outcome(), 10.0, cfg, now, 50, 10, already_sent=True)
+    original = score_outcome(outcome(), 1.0, cfg, now, 50, 10)
+    penalized = score_outcome(outcome(), 1.0, cfg, now, 50, 10, already_sent=True)
 
     assert penalized.score == pytest.approx(original.score * 0.2)
     assert ReasonCode.RECENTLY_SENT in penalized.reasons
@@ -95,10 +95,10 @@ def test_recently_sent_event_is_penalized_less_than_exact_outcome():
         watchlist_slugs=["watch"],
         scoring=ScoringSettings(sent_penalty_factor=0.2, sent_event_penalty_factor=0.6),
     )
-    original = score_outcome(outcome(outcome="No"), 10.0, cfg, now, 50, 10)
+    original = score_outcome(outcome(outcome="No"), 1.0, cfg, now, 50, 10)
     penalized = score_outcome(
         outcome(outcome="No"),
-        10.0,
+        1.0,
         cfg,
         now,
         50,
@@ -107,7 +107,7 @@ def test_recently_sent_event_is_penalized_less_than_exact_outcome():
     )
     exact = score_outcome(
         outcome(outcome="No"),
-        10.0,
+        1.0,
         cfg,
         now,
         50,

@@ -2,7 +2,7 @@
 Description=Run Polymarket morning briefing every day at 08:07 KST
 
 [Timer]
-OnCalendar=*-*-* 08:07:00
+OnCalendar=*-*-* 08:07:00 Asia/Seoul
 Persistent=true
 Unit=polymarket-briefing.service
 

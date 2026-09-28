@@ -1,4 +1,7 @@
 .venv/
+.venv-*/
+.venv.next
+config.yaml.bak*
 __pycache__/
 .pytest_cache/
 .ruff_cache/

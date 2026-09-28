@@ -123,3 +123,65 @@ def test_prune_older_than_removes_stale_rows_only(tmp_path):
         assert remaining_sent == {("slug", "recent", "Yes")}
         assert storage.notification_sent("stale-key") is False
         assert storage.notification_sent("recent-key") is True
+
+
+def test_legacy_state_is_copied_outside_checkout_only_once(tmp_path, monkeypatch):
+    from polymarket_briefing.storage import LEGACY_STORAGE_PATH
+
+    monkeypatch.chdir(tmp_path)
+    state_dir = tmp_path / "external-state"
+    monkeypatch.setenv("POLYMARKET_BRIEFING_STATE_DIR", str(state_dir))
+    legacy = tmp_path / LEGACY_STORAGE_PATH
+    with BriefingStorage(str(legacy)) as storage:
+        storage.record_notification("old", "title", datetime.now(UTC))
+    with BriefingStorage(LEGACY_STORAGE_PATH) as migrated:
+        assert migrated.path == state_dir / "briefing_state.sqlite"
+        assert migrated.notification_sent("old")
+        migrated.record_notification("new", "title", datetime.now(UTC))
+    with BriefingStorage(str(legacy)) as original:
+        assert not original.notification_sent("new")
+        original.record_notification("stale-copy", "title", datetime.now(UTC))
+    with BriefingStorage(LEGACY_STORAGE_PATH) as reopened:
+        assert reopened.notification_sent("new")
+        assert not reopened.notification_sent("stale-copy")
+
+
+def test_dry_run_reads_legacy_without_migrating_or_writing(tmp_path, monkeypatch):
+    from polymarket_briefing.storage import DEFAULT_STORAGE_PATH, LEGACY_STORAGE_PATH
+
+    monkeypatch.chdir(tmp_path)
+    state_dir = tmp_path / "external-state"
+    monkeypatch.setenv("POLYMARKET_BRIEFING_STATE_DIR", str(state_dir))
+    legacy = tmp_path / LEGACY_STORAGE_PATH
+    with BriefingStorage(str(legacy)) as storage:
+        storage.record_notification("old", "title", datetime.now(UTC))
+    before = legacy.read_bytes()
+    with BriefingStorage(DEFAULT_STORAGE_PATH, read_only=True) as preview:
+        assert preview.notification_sent("old")
+        preview.record_notification("preview", "title", datetime.now(UTC))
+    assert legacy.read_bytes() == before
+    assert not state_dir.exists()
+
+
+def test_backup_is_consistent_and_cannot_overwrite_existing_file(tmp_path):
+    path = tmp_path / "state.sqlite"
+    backup = tmp_path / "backups" / "before-deploy.sqlite"
+    with BriefingStorage(str(path)) as storage:
+        storage.record_notification("receipt", "title", datetime.now(UTC))
+        storage.backup_to(backup)
+        with pytest.raises(FileExistsError):
+            storage.backup_to(backup)
+    with BriefingStorage(str(backup)) as copied:
+        assert copied.notification_sent("receipt")
+        assert copied.connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+def test_delivery_receipt_is_atomic_on_duplicate_key(tmp_path):
+    import sqlite3
+
+    with BriefingStorage(str(tmp_path / "state.sqlite")) as storage:
+        now = datetime.now(UTC)
+        storage.record_delivery("same", "title", [sample_outcome()], now)
+        with pytest.raises(sqlite3.IntegrityError):
+            storage.record_delivery("same", "title", [sample_outcome(market_id="other")], now)
+        assert storage.recently_sent_outcome_keys(now, 7) == {("slug", "m1", "Yes")}

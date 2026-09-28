@@ -1,94 +1,60 @@
-# 홈서버 배포 (systemd user units)
+# 홈서버 배포
 
-매일 08:07 KST 브리핑은 GitHub Actions가 아니라 **홈서버의 systemd user timer**가 실행합니다.
-이 디렉터리의 파일은 참고용 예시가 아니라 **실제 운영 중인 서버(`pi-control`, `~/Works/morning-bell`)에서 그대로 가져온 것**입니다. 이전에는 버전 관리 밖에 있어서 서버가 사라지면 복구할 방법이 없었습니다.
+매일 08:07 Asia/Seoul에 `polymarket-briefing.timer`가 브리핑을 실행합니다. `polymarket-briefing-deploy.timer`는 2분마다 origin/main을 확인합니다. 저장소 위치는 `~/Works/morning-bell`이며, 서버의 `config.yaml`과 `keys`는 배포에서 보존합니다.
 
-## 구성
+## 배포 절차
 
-유닛이 두 쌍입니다.
+1. 별도 release 디렉터리에 새 커밋을 풀고 가상환경을 만듭니다.
+2. 린트·전체 테스트·운영 설정 검사를 수행합니다. 실패하면 실행 중인 버전은 유지합니다.
+3. 기존 DB를 Git 밖으로 이전하고 SQLite backup API로 배포 전 백업을 만듭니다.
+4. 체크아웃과 `.venv` 심볼릭 링크를 검증한 버전으로 전환합니다.
+5. systemd unit을 갱신하고 `daemon-reload`합니다. 활성화 실패 시 코드·가상환경·unit을 복원합니다.
 
-| 유닛 | 주기 | 하는 일 |
-|---|---|---|
-| `polymarket-briefing.timer` → `.service` | 매일 08:07 (`Persistent=true`) | 브리핑 1회 실행 |
-| `polymarket-briefing-deploy.timer` → `.service` | 2분마다 | `origin/main`을 폴링해 새 커밋이 있으면 자동 배포 |
+브리핑과 배포는 같은 `~/.local/state/morning-bell/run.lock`을 사용합니다. 브리핑 중에는 배포를 건너뛰고, 배포 중 시작된 브리핑은 최대 10분 기다립니다. 배포 과정에서 실제 브리핑을 발송하지 않습니다.
 
-즉 **배포는 push로 끝납니다.** `deploy.sh`가 2분 안에 받아갑니다.
+## 경로
 
-`deploy.sh`의 안전장치:
+- 운영 DB: `~/.local/state/morning-bell/briefing_state.sqlite`
+- 배포 전 백업: `~/.local/state/morning-bell/backups/`
+- 배포 로그·활성 revision: `~/.local/state/morning-bell/deploy.log`, `deployed-revision`
+- 설치된 release: `~/.local/share/morning-bell/releases/`
+- systemd unit: `~/.config/systemd/user/`
 
-- `flock`으로 중복 실행 방지
-- 브리핑이 실행 중이면 건너뜀 (실행 중인 briefing 밑에서 코드를 바꾸지 않음)
-- `origin/main`과 HEAD가 같으면 아무것도 안 함
-- 변경이 있으면 `git reset --hard origin/main` 후 `pip install -e .`
-- 기록은 `state/deploy.log`
+기존 `state/briefing_state.sqlite`는 최초 한 번 복사하고 원본을 남깁니다. dry-run은 이전 작업을 수행하지 않습니다. 사용자 지정 DB가 Git 체크아웃 안에 있으면 배포를 중단하므로 먼저 외부 경로로 이전하세요.
 
-## 파일 위치
+## 최초 설치 또는 이전 배포 방식에서 업그레이드
 
-저장소의 이 디렉터리와 서버의 실제 위치가 다릅니다.
-
-```
-systemd/deploy.sh                          -> ~/Works/morning-bell/systemd/deploy.sh (저장소 안에서 직접 실행)
-systemd/polymarket-briefing*.service|timer -> ~/.config/systemd/user/
-```
-
-## 최초 설치
+README의 설치 절차대로 `.venv`, `config.yaml`, `keys`를 준비합니다. 기존 배포 타이머를 멈추고 새 배포 스크립트를 임시 파일에서 한 번 실행합니다. `main`에 검증한 변경이 올라간 뒤 실행하세요.
 
 ```bash
-install -Dm644 systemd/polymarket-briefing.service        ~/.config/systemd/user/polymarket-briefing.service
-install -Dm644 systemd/polymarket-briefing.timer          ~/.config/systemd/user/polymarket-briefing.timer
-install -Dm644 systemd/polymarket-briefing-deploy.service ~/.config/systemd/user/polymarket-briefing-deploy.service
-install -Dm644 systemd/polymarket-briefing-deploy.timer   ~/.config/systemd/user/polymarket-briefing-deploy.timer
-systemctl --user daemon-reload
+systemctl --user stop polymarket-briefing-deploy.timer
+cd ~/Works/morning-bell
+git fetch origin main
+git show origin/main:systemd/deploy.sh > /tmp/morning-bell-deploy.sh
+bash /tmp/morning-bell-deploy.sh
 systemctl --user enable --now polymarket-briefing.timer polymarket-briefing-deploy.timer
-loginctl enable-linger "$USER"   # 로그인 없이도 타이머가 돌게 함
+loginctl enable-linger "$USER"
 ```
 
-`loginctl enable-linger`가 없으면 user timer는 로그인 전까지 동작하지 않습니다.
+스크립트는 Linux의 `flock`, `timeout`, GNU `mv`를 사용합니다. Python 3.11 이상과 `venv` 지원이 필요합니다. 이후에는 `main` push를 자동 감지합니다. PR CI를 통과한 코드를 병합하세요. 서버에서도 동일 테스트를 다시 수행합니다.
 
 ## 확인
 
 ```bash
 systemctl --user list-timers polymarket-briefing.timer polymarket-briefing-deploy.timer
 journalctl --user -u polymarket-briefing.service -n 50 --no-pager
-tail -20 ~/Works/morning-bell/state/deploy.log
+tail -30 ~/.local/state/morning-bell/deploy.log
+cat ~/.local/state/morning-bell/deployed-revision
+cd ~/Works/morning-bell
+.venv/bin/polymarket-briefing run --config config.yaml --dry-run
 ```
 
-발송 없이 확인만:
+API 접근이 차단되거나 모든 소스가 실패하면 dry-run도 종료 코드 1을 반환합니다. 일부 소스만 실패하면 부분 조회 경고가 출력됩니다. 실제 전송 검사는 별도 수동 실행으로 알림을 발송하므로 배포 확인에는 dry-run을 사용합니다.
 
-```bash
-cd ~/Works/morning-bell && .venv/bin/polymarket-briefing run --config config.yaml --dry-run
-```
+## 설정 변경과 롤백
 
-수동 1회 실행은 **실제 알림을 발송합니다**:
+`config.yaml`은 자동 교체하지 않습니다. 새 설정은 `config.example.yaml`과 비교하고 `validate-config`로 검사하세요. 기존 기본 DB 경로는 자동 호환됩니다. unit 파일은 매 배포 때 갱신됩니다.
 
-```bash
-systemctl --user start polymarket-briefing.service
-```
+장애 시 먼저 배포 타이머를 멈추세요. 이전 정상 코드를 `git revert`로 main에 복구하고 타이머를 다시 켜면 검증 후 새 release로 배포됩니다. 즉시 수동 복구가 필요하면 deploy.log의 이전 release 경로로 `.venv` 링크와 해당 커밋을 함께 복구한 뒤 설정을 검증하세요. DB는 코드 롤백과 별도로 보존하며, 백업 복원은 필요할 때만 수행합니다.
 
-## config.yaml은 배포되지 않습니다
-
-`config.yaml`은 `.gitignore` 대상이라 **`git reset --hard`로 갱신되지 않습니다.** 워치리스트나 점수 기준을 바꾸면 `config.example.yaml`만 저장소에 반영되고 서버는 예전 값을 그대로 씁니다. push 후 반드시 대조하세요.
-
-```bash
-diff -u ~/Works/morning-bell/config.yaml ~/Works/morning-bell/config.example.yaml
-```
-
-설정 키를 제거하는 변경을 배포할 때는 **코드보다 `config.yaml`을 먼저** 고쳐야 합니다. 알 수 없는 키는 `ValueError`로 즉시 실패하므로, 서버 설정에 사라진 키가 남아 있으면 다음 08:07 실행이 통째로 죽습니다.
-
-## 롤백
-
-deploy 타이머가 2분마다 `origin/main`으로 되돌리므로, 서버에서 `git reset`만 하면 곧 원복됩니다. 실제 롤백은 둘 중 하나입니다.
-
-```bash
-# 1) 타이머를 멈추고 서버에서 되돌리기
-systemctl --user stop polymarket-briefing-deploy.timer
-cd ~/Works/morning-bell && git reset --hard <직전_커밋> && .venv/bin/pip install -e . --quiet
-
-# 2) 또는 GitHub의 main을 되돌리면 2분 내 자동 반영
-```
-
-## 주의
-
-- `Persistent=true`라서 서버가 08:07에 꺼져 있었다면 켜진 직후 밀린 실행이 발생합니다 (실제 알림 발송).
-- 타이머는 시스템 시간대를 따릅니다. `timedatectl`이 `Asia/Seoul`인지 확인하세요.
-- 시크릿은 저장소가 아니라 서버의 `keys` 파일에 있습니다. 서버를 재구축하면 다시 넣어야 합니다.
+`Persistent=true`이므로 예정 시각에 서버가 꺼져 있었다면 다음 기동 때 브리핑이 실행될 수 있습니다. 비밀값은 서버의 `keys` 파일에서만 관리합니다.

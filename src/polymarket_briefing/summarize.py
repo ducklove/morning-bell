@@ -6,12 +6,17 @@ from datetime import datetime
 from re import Match
 from zoneinfo import ZoneInfo
 
-from polymarket_briefing.models import ReasonCode, ScoredOutcome
+from polymarket_briefing.models import ReasonCode, ScoredOutcome, activity_volume
 from polymarket_briefing.utils import pct, pp
 
 
-def summarize(items: list[ScoredOutcome], max_items: int, timezone_name: str = "Asia/Seoul") -> str:
-    local_now = datetime.now(ZoneInfo(timezone_name))
+def summarize(
+    items: list[ScoredOutcome], max_items: int, timezone_name: str = "Asia/Seoul",
+    *, observed_at: datetime | None = None,
+) -> str:
+    local_now = (observed_at or datetime.now(ZoneInfo(timezone_name))).astimezone(
+        ZoneInfo(timezone_name)
+    )
     lines = [f"[Polymarket 아침 브리핑 | {local_now:%Y-%m-%d}]", ""]
     grouped: dict[str, list[ScoredOutcome]] = defaultdict(list)
     for item in items:
@@ -31,7 +36,7 @@ def summarize(items: list[ScoredOutcome], max_items: int, timezone_name: str = "
         facts = "; ".join(
             _fact_line(item, has_multiple_markets) for item in ordered_group[:5]
         )
-        lines.append(facts or f"거래량 {outcome.volume_24h or outcome.volume or 0:.0f}")
+        lines.append(facts or f"거래량 {activity_volume(outcome):.0f}")
         explanation = _trend_explanation(ordered_group)
         if explanation:
             lines.append(f"해설: {explanation}")
@@ -44,6 +49,28 @@ def summarize(items: list[ScoredOutcome], max_items: int, timezone_name: str = "
         lines.append("")
     lines.append("꼬리표: 정보 요약이며 투자 조언이 아닙니다.")
     return "\n".join(lines)
+
+
+def summary_title_sources(items: list[ScoredOutcome]) -> dict[str, str]:
+    groups: dict[str, list[ScoredOutcome]] = defaultdict(list)
+    for item in items:
+        groups[item.outcome.event_slug].append(item)
+    return {
+        slug: _display_title(
+            group[0].outcome.event_title,
+            group[0].outcome.event_title if _has_multiple_markets(group)
+            else group[0].outcome.market_question,
+        )
+        for slug, group in groups.items()
+    }
+
+
+def displayed_items(items: list[ScoredOutcome]) -> list[ScoredOutcome]:
+    """Exactly the outcomes rendered as facts, including the per-event display cap."""
+    groups: dict[str, list[ScoredOutcome]] = defaultdict(list)
+    for item in items:
+        groups[item.outcome.event_slug].append(item)
+    return [item for group in groups.values() for item in _display_items(group)[:5]]
 
 
 def _display_items(group: list[ScoredOutcome]) -> list[ScoredOutcome]:

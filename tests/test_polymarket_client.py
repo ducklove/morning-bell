@@ -97,7 +97,7 @@ def test_get_json_exhausts_max_retries_and_chains_original_error(httpx_mock, sle
 
     assert len(httpx_mock.get_requests()) == 3
     assert len(sleep_calls) == 2
-    assert str(excinfo.value) == f"Polymarket request failed: {GAMMA}/flaky"
+    assert str(excinfo.value) == f"Polymarket request failed: {GAMMA}/flaky (HTTP 503)"
 
     cause = excinfo.value.__cause__
     assert isinstance(cause, httpx.HTTPStatusError)

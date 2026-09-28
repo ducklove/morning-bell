@@ -7,5 +7,6 @@ After=network-online.target
 Type=oneshot
 WorkingDirectory=/home/cantabile/Works/morning-bell
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/cantabile/Works/morning-bell/.venv/bin/polymarket-briefing run --config /home/cantabile/Works/morning-bell/config.yaml
-TimeoutStartSec=10min
+ExecStartPre=/usr/bin/mkdir -p %h/.local/state/morning-bell
+ExecStart=/usr/bin/flock -w 600 %h/.local/state/morning-bell/run.lock %h/Works/morning-bell/.venv/bin/polymarket-briefing run --config %h/Works/morning-bell/config.yaml
+TimeoutStartSec=20min
