@@ -52,7 +52,11 @@ class PolymarketClient:
             if attempt >= self.settings.max_retries:
                 break
             time.sleep(self.settings.backoff_seconds * (2**attempt))
-        raise RuntimeError(f"Polymarket request failed: {url}") from last_error
+        detail = (
+            f" (HTTP {last_error.response.status_code})"
+            if isinstance(last_error, httpx.HTTPStatusError) else ""
+        )
+        raise RuntimeError(f"Polymarket request failed: {url}{detail}") from last_error
 
     def get_event_by_slug(self, slug: str) -> dict[str, Any]:
         primary = f"{self.settings.gamma_base_url.rstrip('/')}/events/slug/{slug}"
@@ -125,10 +129,12 @@ class PolymarketClient:
             params["closed"] = "false"
         data = self._get_json(url, params)
         if isinstance(data, dict):
-            data = data.get("events", data.get("data", []))
+            data = data.get("events", data.get("data"))
         if not isinstance(data, list):
-            return []
-        return [item for item in data if isinstance(item, dict)]
+            raise RuntimeError("Unexpected discovery payload")
+        if any(not isinstance(item, dict) for item in data):
+            raise RuntimeError("Unexpected discovery event entry")
+        return data
 
     def get_price_history(
         self, token_id: str, start_ts: int, end_ts: int, interval: str | None = None

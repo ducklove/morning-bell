@@ -122,7 +122,7 @@ def test_stale_watchlist_notice_sits_above_disclaimer():
     lines = result.splitlines()
 
     assert lines[-1].startswith("꼬리표:")
-    assert "[점검] 워치리스트 1개가 종료됨: dead-slug" in result
+    assert "[점검] 워치리스트 1개가 종료됨 · 목록 갱신 필요" in result
 
 
 def test_stale_watchlist_notice_is_absent_when_watchlist_is_healthy():

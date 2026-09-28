@@ -119,3 +119,16 @@ def test_example_config_loads():
     # Still wired through config even though other modules consume them.
     assert cfg.discovery.include_active_only is True
     assert cfg.discovery.include_closed is False
+
+
+@pytest.mark.parametrize("body", [
+    "polymarket:\n  page_size: 0\n",
+    "polymarket:\n  max_retries: -1\n",
+    "scoring:\n  max_items: '7'\n",
+    "storage:\n  retention_days: 0\n",
+    "notification:\n  provider: typo\n",
+    "scoring:\n  score_weights:\n    change_signal: .nan\n",
+])
+def test_config_rejects_invalid_values_before_a_deployment(tmp_path, body):
+    with pytest.raises(ValueError):
+        load_config(_write_config(tmp_path, body))

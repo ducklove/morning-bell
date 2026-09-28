@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sys
 import time
 from collections.abc import Iterable
@@ -8,6 +9,7 @@ from pathlib import Path
 import httpx
 
 from polymarket_briefing.config import NotificationSettings
+from polymarket_briefing.models import ScoredOutcome
 from polymarket_briefing.utils import read_secret
 
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
@@ -21,6 +23,38 @@ NTFY_BODY_BUDGET_BYTES = NTFY_MAX_BYTES - NTFY_SAFETY_MARGIN_BYTES
 
 NTFY_TRUNCATION_MARKER = "…(길이 제한으로 일부 항목 생략)"
 NTFY_DISCLAIMER_LINE = "꼬리표: 정보 요약이며 투자 조언이 아닙니다."
+
+
+def prepare_briefing(
+    message: str, items: list[ScoredOutcome], budget: int = NTFY_BODY_BUDGET_BYTES,
+) -> tuple[str, list[ScoredOutcome]]:
+    """Fit complete event paragraphs and return only their displayed outcomes.
+
+    The same conservative UTF-8 budget is used for preview and both providers.
+    Health notices and the disclaimer are kept even when event blocks are omitted.
+    This runs before deduplication and before recording delivery.
+    """
+    blocks = message.strip().split("\n\n")
+    event_blocks = [block for block in blocks if re.match(r"^\d+\) ", block)]
+    slugs = list(dict.fromkeys(item.outcome.event_slug for item in items))
+    if len(event_blocks) != len(slugs):
+        raise ValueError("Briefing blocks do not match the displayed events")
+    if _byte_length(message) <= budget:
+        return message, items
+    fixed = [block for block in blocks if block not in event_blocks]
+    header, footer = fixed[0], fixed[1:]
+    kept: list[str] = []
+    kept_slugs: set[str] = set()
+    for slug, block in zip(slugs, event_blocks, strict=True):
+        block = re.sub(r"^\d+\)", f"{len(kept) + 1})", block, count=1)
+        candidate = "\n\n".join([header, *kept, block, NTFY_TRUNCATION_MARKER, *footer])
+        if _byte_length(candidate) <= budget:
+            kept.append(block)
+            kept_slugs.add(slug)
+    fitted = "\n\n".join([header, *kept, NTFY_TRUNCATION_MARKER, *footer])
+    if _byte_length(fitted) > budget:
+        raise ValueError("Briefing health notices exceed the notification budget")
+    return fitted, [item for item in items if item.outcome.event_slug in kept_slugs]
 
 
 def truncate_for_ntfy(message: str, budget: int = NTFY_BODY_BUDGET_BYTES) -> str:

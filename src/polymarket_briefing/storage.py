@@ -1,19 +1,85 @@
 from __future__ import annotations
 
+import os
 import sqlite3
+import tempfile
+from contextlib import closing, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from polymarket_briefing.models import NormalizedOutcome, Snapshot
 
+DEFAULT_STORAGE_PATH = "~/.local/state/morning-bell/briefing_state.sqlite"
+LEGACY_STORAGE_PATH = "state/briefing_state.sqlite"
+
+
+def default_state_dir() -> Path:
+    explicit = os.environ.get("POLYMARKET_BRIEFING_STATE_DIR")
+    if explicit:
+        return Path(explicit).expanduser()
+    return Path(os.environ.get("XDG_STATE_HOME", "~/.local/state")).expanduser() / "morning-bell"
+
+
+def resolve_storage_path(configured: str) -> Path:
+    if configured in {DEFAULT_STORAGE_PATH, LEGACY_STORAGE_PATH}:
+        return default_state_dir() / "briefing_state.sqlite"
+    return Path(configured).expanduser()
+
+
+def _backup_database(source: Path, destination: Path) -> None:
+    """Publish a consistent SQLite backup without overwriting an existing file."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=destination.parent, suffix=".sqlite") as temporary:
+        with (
+            closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True)) as src,
+            closing(sqlite3.connect(temporary.name)) as dst,
+        ):
+            src.backup(dst)
+        os.link(temporary.name, destination)
+
 
 class BriefingStorage:
-    def __init__(self, path: str):
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(self.path)
+    def __init__(self, path: str, *, read_only: bool = False):
+        self.path = resolve_storage_path(path)
+        source = self.path
+        legacy = Path(LEGACY_STORAGE_PATH)
+        if (path in {DEFAULT_STORAGE_PATH, LEGACY_STORAGE_PATH}
+                and not source.exists() and legacy.exists()):
+            source = legacy
+            if not read_only:
+                with suppress(FileExistsError):
+                    _backup_database(legacy, self.path)
+                source = self.path
+        if read_only:
+            self.connection = sqlite3.connect(":memory:")
+            if source.exists():
+                with closing(sqlite3.connect(
+                    source.resolve().as_uri() + "?mode=ro", uri=True,
+                )) as src:
+                    src.backup(self.connection)
+        else:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.connection = sqlite3.connect(self.path)
         self.connection.row_factory = sqlite3.Row
         self._migrate()
+
+    def backup_to(self, destination: Path) -> None:
+        _backup_database(self.path, destination)
+
+    def record_delivery(
+        self, dedupe_key: str, title: str, outcomes: list[NormalizedOutcome], sent_at: datetime,
+    ) -> None:
+        """Commit the notification and its visible outcomes as one receipt."""
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO sent_notifications (sent_at, dedupe_key, title) VALUES (?, ?, ?)",
+                (sent_at.isoformat(), dedupe_key, title),
+            )
+            self.connection.executemany(
+                "INSERT INTO sent_outcomes (sent_at, event_slug, market_id, outcome) "
+                "VALUES (?, ?, ?, ?)",
+                [(sent_at.isoformat(), i.event_slug, i.market_id, i.outcome) for i in outcomes],
+            )
 
     def close(self) -> None:
         self.connection.close()

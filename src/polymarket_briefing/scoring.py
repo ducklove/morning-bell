@@ -9,6 +9,7 @@ from polymarket_briefing.models import (
     NormalizedOutcome,
     ReasonCode,
     ScoredOutcome,
+    activity_volume,
     outcome_haystack,
     outcome_key,
 )
@@ -22,7 +23,7 @@ def score_outcomes(
     sent_outcome_keys: set[tuple[str, str | None, str]] | None = None,
     sent_event_slugs: set[str] | None = None,
 ) -> list[ScoredOutcome]:
-    max_volume = max((item.volume_24h or item.volume or 0 for item in outcomes), default=0)
+    max_volume = max((activity_volume(item) for item in outcomes), default=0)
     max_liquidity = max((item.liquidity or 0 for item in outcomes), default=0)
     sent_outcome_keys = sent_outcome_keys or set()
     sent_event_slugs = sent_event_slugs or set()
@@ -56,15 +57,19 @@ def score_outcome(
     signals = {
         "change_signal": change_signal(delta_24h_pp),
         "relevance_signal": relevance_signal(outcome, config),
-        "volume_signal": log_signal(outcome.volume_24h or outcome.volume, max_volume_seen),
+        "volume_signal": log_signal(activity_volume(outcome), max_volume_seen),
         "probability_signal": probability_signal(outcome.probability),
         "deadline_signal": deadline_signal(outcome, observed_at),
         "liquidity_signal": log_signal(outcome.liquidity, max_liquidity_seen),
     }
     score = sum(weights[name] * 100 * signals[name] for name in weights)
-    if already_sent:
+    sharply_changed = (
+        delta_24h_pp is not None
+        and abs(delta_24h_pp) >= config.scoring.probability_change_alert_pp
+    )
+    if already_sent and not sharply_changed:
         score *= max(0.0, min(config.scoring.sent_penalty_factor, 1.0))
-    elif event_recently_sent:
+    elif event_recently_sent and not sharply_changed:
         score *= max(0.0, min(config.scoring.sent_event_penalty_factor, 1.0))
     return ScoredOutcome(
         outcome=outcome,

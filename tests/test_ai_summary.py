@@ -7,7 +7,7 @@ import pytest
 from polymarket_briefing.ai_summary import (
     DISCLAIMER_LINE,
     OPENROUTER_URL,
-    _numbers_are_grounded,
+    _apply_titles,
     load_openrouter_key,
     summarize_with_openrouter,
 )
@@ -96,192 +96,66 @@ def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("polymarket_briefing.ai_summary.time.sleep", lambda _seconds: None)
 
 
-# --- grounding guard ---------------------------------------------------------
+def _titles(title: str = "12월 31일 세계 시가총액 1위 기업은?") -> str:
+    import json
+    return json.dumps({"titles": [{"id": "largest-company-december-31", "title": title}]})
 
 
-def test_swapped_numbers_between_entities_are_rejected() -> None:
-    """The regression test: subset-only checking passes this, pairing must not."""
-    swapped = BASE_SUMMARY.replace(
-        "Apple 예 79.3% (+1.2pp); NVIDIA 예 20.5% (-1.2pp)",
-        "NVIDIA 예 79.3% (+1.2pp); Apple 예 20.5% (-1.2pp)",
-    )
-    # Every (number, unit) token is still present in the base summary...
-    assert sorted(_tokens(swapped)) == sorted(_tokens(BASE_SUMMARY))
-    # ...but the numbers now belong to the wrong companies.
-    assert _numbers_are_grounded(swapped, BASE_SUMMARY) is False
-
-
-def test_legitimate_korean_rewording_is_accepted() -> None:
-    assert _numbers_are_grounded(CLEAN_AI_TEXT, BASE_SUMMARY) is True
-
-
-def test_reworded_text_that_drops_an_entity_is_accepted() -> None:
-    trimmed = "\n".join(
-        [
-            "1) 시가총액 1위 경쟁",
-            "Apple이 79.3%로 선두를 지키고 있습니다.",
-            DISCLAIMER_LINE,
-        ]
-    )
-    assert _numbers_are_grounded(trimmed, BASE_SUMMARY) is True
-
-
-def test_invented_number_is_rejected() -> None:
-    invented = CLEAN_AI_TEXT.replace("79.3%", "88.4%")
-    assert _numbers_are_grounded(invented, BASE_SUMMARY) is False
-
-
-def test_invented_delta_is_rejected() -> None:
-    invented = CLEAN_AI_TEXT.replace("(+1.2pp)", "(+9.9pp)")
-    assert _numbers_are_grounded(invented, BASE_SUMMARY) is False
-
-
-def test_swapped_deltas_are_rejected() -> None:
-    swapped_delta = CLEAN_AI_TEXT.replace("(+1.2pp)", "(-1.2pp)", 1).replace(
-        "20.5% (-1.2pp)", "20.5% (+1.2pp)"
-    )
-    assert _numbers_are_grounded(swapped_delta, BASE_SUMMARY) is False
-
-
-def test_reordered_entities_with_intact_pairings_are_accepted() -> None:
-    reordered = "\n".join(
-        [
-            "1) 시가총액 1위 경쟁",
-            "NVIDIA 20.5% (-1.2pp), Apple 79.3% (+1.2pp)",
-            DISCLAIMER_LINE,
-        ]
-    )
-    assert _numbers_are_grounded(reordered, BASE_SUMMARY) is True
-
-
-def test_number_borrowed_from_another_item_is_rejected() -> None:
-    """Attribution is scoped per item, so numbers cannot drift across items."""
-    bled = "\n".join(
-        [
-            "1) 최고 AI 모델 경쟁",
-            "Google 79.3% (+1.2pp)",
-            "",
-            "2) 시가총액 1위 경쟁",
-            "Apple 79.3% (+1.2pp); NVIDIA 20.5% (-1.2pp)",
-            DISCLAIMER_LINE,
-        ]
-    )
-    assert _numbers_are_grounded(bled, MULTI_ITEM_BASE) is False
-
-
-def test_ambiguous_respectively_phrasing_is_rejected() -> None:
-    """Known false positive, kept deliberately: ambiguity must fail closed."""
-    ambiguous = "\n".join(
-        [
-            "1) 시가총액 1위 경쟁",
-            "Apple과 NVIDIA가 각각 79.3%, 20.5%를 기록했습니다.",
-            DISCLAIMER_LINE,
-        ]
-    )
-    assert _numbers_are_grounded(ambiguous, BASE_SUMMARY) is False
-
-
-def test_subject_named_after_the_number_is_accepted() -> None:
-    trailing_subject = "\n".join(
-        [
-            "1) 시가총액 1위 경쟁",
-            "79.3% (+1.2pp)를 기록한 Apple이 선두를 지키고 있습니다.",
-            DISCLAIMER_LINE,
-        ]
-    )
-    assert _numbers_are_grounded(trailing_subject, BASE_SUMMARY) is True
-
-
-def test_subject_missing_from_base_is_only_membership_checked() -> None:
-    """Documented gap: a subject the base never names in Latin script cannot be paired."""
-    translated_subject = "\n".join(
-        [
-            "1) 시가총액 1위 경쟁",
-            "애플(AAPL) 79.3% (+1.2pp), 엔비디아 20.5% (-1.2pp)",
-            DISCLAIMER_LINE,
-        ]
-    )
-    assert _numbers_are_grounded(translated_subject, BASE_SUMMARY) is True
-
-
-def test_empty_text_is_rejected() -> None:
-    assert _numbers_are_grounded("   \n  ", BASE_SUMMARY) is False
-
-
-def test_text_without_numbers_is_accepted() -> None:
-    assert _numbers_are_grounded("오늘은 특별한 움직임이 없습니다.", BASE_SUMMARY) is True
-
-
-def _tokens(text: str) -> list[tuple[float, str]]:
-    from polymarket_briefing.ai_summary import _numeric_tokens
-
-    return list(_numeric_tokens(text))
-
-
-# --- end-to-end summarization ------------------------------------------------
-
-
-def test_clean_response_is_returned_with_disclaimer(httpx_mock: Any) -> None:
-    httpx_mock.add_response(method="POST", url=OPENROUTER_URL, json=_completion(CLEAN_AI_TEXT))
-
+def test_only_titles_are_rewritten_and_all_facts_are_preserved(httpx_mock):
+    httpx_mock.add_response(method="POST", url=OPENROUTER_URL, json=_completion(_titles()))
     result = summarize_with_openrouter(_items(), BASE_SUMMARY, "key")
-
-    assert result != BASE_SUMMARY
-    assert "Apple이 79.3%" in result
-    assert result.strip().endswith(DISCLAIMER_LINE)
-    assert result.count(DISCLAIMER_LINE) == 1
+    assert "1) 12월 31일 세계 시가총액 1위 기업은?" in result
+    assert [s for s in result.splitlines() if not s.startswith("1)")] == [
+        s for s in BASE_SUMMARY.splitlines() if not s.startswith("1)")
+    ]
     request = httpx_mock.get_request()
-    assert request is not None
     assert request.headers["Authorization"] == "Bearer key"
+    assert b"79.3%" not in request.content
+    assert b"20.5%" not in request.content
 
 
-def test_missing_disclaimer_is_appended(httpx_mock: Any) -> None:
-    without_disclaimer = CLEAN_AI_TEXT.replace(DISCLAIMER_LINE, "").strip()
-    httpx_mock.add_response(method="POST", url=OPENROUTER_URL, json=_completion(without_disclaimer))
-
-    result = summarize_with_openrouter(_items(), BASE_SUMMARY, "key")
-
-    assert result.strip().endswith(DISCLAIMER_LINE)
-
-
-def test_missing_header_is_restored_from_base(httpx_mock: Any) -> None:
-    body = "\n".join(
-        [
-            "1) 12월 31일 시가총액 1위 경쟁",
-            "Apple이 79.3% (+1.2pp)로 앞서고 있습니다.",
-            DISCLAIMER_LINE,
-        ]
-    )
-    httpx_mock.add_response(method="POST", url=OPENROUTER_URL, json=_completion(body))
-
-    result = summarize_with_openrouter(_items(), BASE_SUMMARY, "key")
-
-    assert result.splitlines()[0] == BASE_SUMMARY.splitlines()[0]
-
-
-def test_swapped_response_falls_back_to_base(
-    httpx_mock: Any, capsys: pytest.CaptureFixture[str]
-) -> None:
-    swapped = CLEAN_AI_TEXT.replace(
-        "Apple이 79.3% (+1.2pp)로 앞서고, NVIDIA는 20.5% (-1.2pp)",
-        "NVIDIA가 79.3% (+1.2pp)로 앞서고, Apple은 20.5% (-1.2pp)",
-    )
-    httpx_mock.add_response(method="POST", url=OPENROUTER_URL, json=_completion(swapped))
-
-    result = summarize_with_openrouter(_items(), BASE_SUMMARY, "key")
-
-    assert result == BASE_SUMMARY
-    assert "warning: AI summary unavailable" in capsys.readouterr().err
-
-
-def test_invented_number_response_falls_back_to_base(httpx_mock: Any) -> None:
-    httpx_mock.add_response(
-        method="POST",
-        url=OPENROUTER_URL,
-        json=_completion(CLEAN_AI_TEXT.replace("20.5%", "42.0%")),
-    )
-
+@pytest.mark.parametrize("content", [
+    "오늘은 특별한 움직임이 없습니다.",
+    "애플 예 20.5% (-1.2pp); 엔비디아 예 79.3% (+1.2pp)",
+    '{"titles": []}',
+    '{"titles": [{"id": "wrong", "title": "12월 31일 질문"}]}',
+    '{"titles": [{"id": "largest-company-december-31", "title": "날짜 누락"}]}',
+    '{"titles": [{"id": "largest-company-december-31", "title": "12월 31일", "url": "wrong"}]}',
+    _titles("12월 31일 https://polymarket.com/event/wrong"),
+    _titles("12월 31일 질문\nApple 20.5%"),
+    _titles("12월 31일 확률 상승"),
+    _titles("13월 31일 질문"),
+])
+def test_invalid_or_unstructured_edits_fall_back(httpx_mock, content):
+    httpx_mock.add_response(method="POST", url=OPENROUTER_URL, json=_completion(content))
     assert summarize_with_openrouter(_items(), BASE_SUMMARY, "key") == BASE_SUMMARY
+
+
+def test_duplicate_ids_are_rejected():
+    import json
+    with pytest.raises(ValueError):
+        _apply_titles(json.dumps({"titles": [
+            {"id": "a", "title": "가"}, {"id": "a", "title": "나"},
+        ]}), {"a": "A", "b": "B"}, "1) A\n\n2) B")
+
+
+def test_reordered_json_preserves_event_order():
+    import json
+    content = json.dumps({"titles": [
+        {"id": "b", "title": "나"}, {"id": "a", "title": "가"},
+    ]})
+    assert _apply_titles(content, {"a": "A", "b": "B"}, "1) A\n\n2) B") == "1) 가\n\n2) 나"
+
+
+def test_empty_selection_does_not_call_the_model(httpx_mock):
+    assert summarize_with_openrouter([], BASE_SUMMARY, "key") == BASE_SUMMARY
+    assert httpx_mock.get_requests() == []
+
+
+def test_permanent_http_error_is_not_retried(httpx_mock):
+    httpx_mock.add_response(method="POST", url=OPENROUTER_URL, status_code=401)
+    assert summarize_with_openrouter(_items(), BASE_SUMMARY, "key") == BASE_SUMMARY
+    assert len(httpx_mock.get_requests()) == 1
 
 
 def test_server_error_on_every_attempt_falls_back(
@@ -298,11 +172,11 @@ def test_server_error_on_every_attempt_falls_back(
 
 def test_transient_error_then_success_is_used(httpx_mock: Any) -> None:
     httpx_mock.add_response(method="POST", url=OPENROUTER_URL, status_code=503)
-    httpx_mock.add_response(method="POST", url=OPENROUTER_URL, json=_completion(CLEAN_AI_TEXT))
+    httpx_mock.add_response(method="POST", url=OPENROUTER_URL, json=_completion(_titles()))
 
     result = summarize_with_openrouter(_items(), BASE_SUMMARY, "key")
 
-    assert "Apple이 79.3%" in result
+    assert "12월 31일 세계 시가총액 1위 기업은?" in result
     assert len(httpx_mock.get_requests()) == 2
 
 
@@ -361,12 +235,12 @@ def test_null_content_falls_back(httpx_mock: Any) -> None:
 def test_unexpected_failure_falls_back(
     httpx_mock: Any, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    httpx_mock.add_response(method="POST", url=OPENROUTER_URL, json=_completion(CLEAN_AI_TEXT))
+    httpx_mock.add_response(method="POST", url=OPENROUTER_URL, json=_completion(_titles()))
 
-    def _boom(_ai_text: str, _base: str) -> bool:
+    def _boom(*_args) -> bool:
         raise RuntimeError("guard exploded")
 
-    monkeypatch.setattr("polymarket_briefing.ai_summary._numbers_are_grounded", _boom)
+    monkeypatch.setattr("polymarket_briefing.ai_summary._apply_titles", _boom)
 
     result = summarize_with_openrouter(_items(), BASE_SUMMARY, "key")
 
