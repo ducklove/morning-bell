@@ -25,3 +25,4 @@ jobs:
       - run: pytest -q
       - run: polymarket-briefing validate-config --config config.example.yaml
       - run: bash -n systemd/deploy.sh
+      - run: bash -n systemd/prune-releases.sh

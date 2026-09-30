@@ -50,6 +50,7 @@ git archive "$REMOTE_REV" | tar -x -C "$RELEASE"
   venv/bin/ruff check .
   venv/bin/pytest -q
   bash -n systemd/deploy.sh
+  bash -n systemd/prune-releases.sh
 )
 "$RELEASE/venv/bin/polymarket-briefing" validate-config --config "$REPO_DIR/config.yaml"
 "$RELEASE/venv/bin/python" - "$REPO_DIR" <<'PY'
@@ -105,3 +106,8 @@ systemctl --user daemon-reload
 printf '%s\n' "$REMOTE_REV" > "$STATE_DIR/deployed-revision"
 trap - ERR
 echo "$(date -Iseconds) deployed ${LOCAL_REV:0:7} -> ${REMOTE_REV:0:7}; runtime=$RELEASE"
+
+# Keep the running release and the previous one (rollback target); drop the
+# rest, including releases whose build or tests failed. Never fails the deploy.
+bash "$RELEASE/systemd/prune-releases.sh" "$RELEASES_DIR" "$RELEASE" "$PREVIOUS_VENV" ||
+  echo "$(date -Iseconds) release pruning failed; continuing"

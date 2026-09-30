@@ -9,6 +9,7 @@
 3. 기존 DB를 Git 밖으로 이전하고 SQLite backup API로 배포 전 백업을 만듭니다.
 4. 체크아웃과 `.venv` 심볼릭 링크를 검증한 버전으로 전환합니다.
 5. systemd unit을 갱신하고 `daemon-reload`합니다. 활성화 실패 시 코드·가상환경·unit을 복원합니다.
+6. 전환에 성공하면 `prune-releases.sh`가 현재 release와 직전 release(롤백 대상)만 남기고 나머지 release 디렉터리(테스트에 실패한 빌드 포함)를 지웁니다. 정리 실패는 배포를 실패시키지 않습니다.
 
 브리핑과 배포는 같은 `~/.local/state/morning-bell/run.lock`을 사용합니다. 브리핑 중에는 배포를 건너뛰고, 배포 중 시작된 브리핑은 최대 10분 기다립니다. 배포 과정에서 실제 브리핑을 발송하지 않습니다.
 
@@ -17,7 +18,7 @@
 - 운영 DB: `~/.local/state/morning-bell/briefing_state.sqlite`
 - 배포 전 백업: `~/.local/state/morning-bell/backups/`
 - 배포 로그·활성 revision: `~/.local/state/morning-bell/deploy.log`, `deployed-revision`
-- 설치된 release: `~/.local/share/morning-bell/releases/`
+- 설치된 release: `~/.local/share/morning-bell/releases/` (현재 + 직전 1개만 유지)
 - systemd unit: `~/.config/systemd/user/`
 
 기존 `state/briefing_state.sqlite`는 최초 한 번 복사하고 원본을 남깁니다. dry-run은 이전 작업을 수행하지 않습니다. 사용자 지정 DB가 Git 체크아웃 안에 있으면 배포를 중단하므로 먼저 외부 경로로 이전하세요.
